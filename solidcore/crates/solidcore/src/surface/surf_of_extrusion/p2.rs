@@ -90,6 +90,7 @@
 use crate::curve::curve::p7::PropertyAnalysisOptions;
 use crate::curve::curve::p8::CurveIntersectOptions;
 use crate::curve::curve::{Curve, CurveKind, CurvePropertyType};
+use crate::error::surface::SurfaceFailure;
 use crate::error::{ignore_status, ignored, Result, SolidError};
 use crate::geom::axis2_placement::Axis2Placement;
 use crate::geom::extent1d::Extent1d;
@@ -101,6 +102,7 @@ use crate::geom::vector3d::{Point3, Vec3};
 use crate::intersect::curve_class::CurveClassification;
 use crate::intersect::point_class::{ClassGeometry, ClassObject, ClassObjectKind, PointClassType};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{EFF_ZERO, EFF_ZERO_PARAM, EFF_ZERO_SQRT, PI};
 use crate::nurbs::b_spline_curve::BoundingBoxRequest as CurveBoxRequest;
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
@@ -124,11 +126,16 @@ use super::p1::{
     gen_base, gen_with_out_of_bounds, intersect_generators, CurveOrientType, SurfOfExtrusion,
 };
 use super::plane_patch::{
-    coincident_patch, curve_plane_deviation, curve_source_deviation, generator_crosses_plane,
-    generator_in_plane, PatchInputs,
+    coincident_patch, curve_source_deviation, generator_crosses_plane, generator_in_plane,
+    PatchInputs,
 };
 
 const OP_PLANE: &str = "surface::surf_of_extrusion::p2::SurfOfExtrusion::intersect_with_plane";
+/// The reason of the defect where the plane's line, moved into the output, is not at the index
+/// it was moved to: the loop records the index and pushes the line there before its next
+/// interval, so the read always finds it.
+const MOVED_LINE_LOST: &str = "the plane intersection's line is not at the output index it \
+                               was moved to, though the loop pushes it there before reading it";
 const OP_CYL: &str = "surface::surf_of_extrusion::p2::SurfOfExtrusion::intersect_with_cylinder";
 const OP_EXT: &str =
     "surface::surf_of_extrusion::p2::SurfOfExtrusion::intersect_with_surf_of_extrusion";
@@ -305,7 +312,7 @@ impl SurfOfExtrusion {
     fn gen_or_null(&self, op: &'static str) -> Result<&Curve> {
         self.gen_curve
             .as_ref()
-            .ok_or_else(|| SolidError::surface_missing(op, "the generator curve"))
+            .ok_or_else(|| SolidError::surface(op, SurfaceFailure::SurfaceWithoutGenerator))
     }
 
     /// Maps only the sweep coordinate, including for a lazy associated NURB.
@@ -379,9 +386,14 @@ impl SurfOfExtrusion {
             && self.anal_uv_domain.v_interval().contains_value(0.0, 0.0)
             && generator_crosses_plane(gen, self.extrusion_vec, plane, other_uv_domain)
         {
-            return Err(SolidError::surface_failed(
+            return Err(SolidError::surface(
                 OP_GLOBAL,
-                "a certified plane crossing was not resolved at zero tolerance",
+                SurfaceFailure::Defect {
+                    why: "the plane special case declined and its general fallback returned \
+                          no curve, though the generator's end signs prove it crosses the \
+                          plane and the drift bound at zero tolerance rules out the parallel \
+                          case",
+                },
             ));
         }
         Ok(())
@@ -725,20 +737,10 @@ impl SurfOfExtrusion {
             };
             out.needs_more_intersections = needs_more;
 
-            // no work - no solutions
-            if plane_x.curves_3d.is_empty() {
+            // no work - no solutions; else two planes intersect in one line
+            let Some(line) = plane_x.curves_3d.into_iter().next() else {
                 return Ok(out);
-            }
-
-            // arrive here when two planes intersect in one line
-            let mut lines = plane_x.curves_3d;
-            if lines.is_empty() {
-                return Err(SolidError::surface_failed(
-                    OP_PLANE,
-                    "the plane intersection gave no line",
-                ));
-            }
-            let line = lines.swap_remove(0);
+            };
             let line_ivl = line.natural_interval();
 
             // Solve near the profile, independently of a distant interval midpoint
@@ -887,9 +889,11 @@ impl SurfOfExtrusion {
                         .as_ref()
                         .or_else(|| out.curves_3d.get(moved_to))
                         .ok_or_else(|| {
-                            SolidError::surface_failed(
+                            SolidError::surface(
                                 OP_PLANE,
-                                "the classification line is missing",
+                                SurfaceFailure::Defect {
+                                    why: MOVED_LINE_LOST,
+                                },
                             )
                         })?
                         .evaluate_point(k, interval.interval().mid())?;
@@ -942,9 +946,11 @@ impl SurfOfExtrusion {
                             .curves_3d
                             .get(moved_to)
                             .ok_or_else(|| {
-                                SolidError::surface_failed(
+                                SolidError::surface(
                                     OP_PLANE,
-                                    "the moved intersection curve is missing",
+                                    SurfaceFailure::Defect {
+                                        why: MOVED_LINE_LOST,
+                                    },
                                 )
                             })?
                             .clone(),
@@ -954,9 +960,11 @@ impl SurfOfExtrusion {
                         .as_ref()
                         .or_else(|| out.curves_3d.get(moved_to))
                         .ok_or_else(|| {
-                            SolidError::surface_failed(
+                            SolidError::surface(
                                 OP_PLANE,
-                                "the moved intersection curve is missing",
+                                SurfaceFailure::Defect {
+                                    why: MOVED_LINE_LOST,
+                                },
                             )
                         })?;
                     let mut curve = source.copy(k)?;
@@ -991,7 +999,7 @@ impl SurfOfExtrusion {
                 .curve_vec
                 .angle_between(self.extrusion_vec)
                 .unwrap_or(0.0);
-            let dist_along_extrusion = dist_center_base_to_plane * angle_rad.cos();
+            let dist_along_extrusion = dist_center_base_to_plane * det::cos(angle_rad);
             let param_along_extrusion = dist_along_extrusion / self.extrusion_vec.length();
 
             // get extrusionSurface's sweep interval
@@ -1160,9 +1168,13 @@ impl SurfOfExtrusion {
                 // upstream, which then reads the points)
                 let crv_pt = gen.evaluate(k, sol.start.parameters[0], 1, true, true)?;
                 let (Some(&pt0), Some(&pt1)) = (crv_pt.first(), crv_pt.get(1)) else {
-                    return Err(SolidError::surface_failed(
+                    return Err(SolidError::surface(
                         OP_PLANE,
-                        "the generator evaluation gave no point and tangent",
+                        SurfaceFailure::Defect {
+                            why: "the generator's evaluation with one derivative returned \
+                                  fewer than two entries, though it returns the point and \
+                                  its tangent",
+                        },
                     ));
                 };
                 let crv = match self.create_directrix_from_point(k, pt0, EFF_ZERO_SQRT) {
@@ -1175,9 +1187,12 @@ impl SurfOfExtrusion {
                 // trim line control Points to plane
                 let nurb = crv.get_or_create_gw_nurb()?;
                 let (Some(&pw0), Some(&pw1)) = (nurb.cpts().first(), nurb.cpts().get(1)) else {
-                    return Err(SolidError::surface_failed(
+                    return Err(SolidError::surface(
                         OP_PLANE,
-                        "the directrix has fewer than two control points",
+                        SurfaceFailure::Defect {
+                            why: "the directrix line's NURB has fewer than two control \
+                                  points, though a line's NURB has exactly two",
+                        },
                     ));
                 };
                 let start_pt = to_euclid(pw0);
@@ -1294,7 +1309,7 @@ impl SurfOfExtrusion {
         // constructed curves: plane-domain sides can be offset from the extrusion.
         if sweep_parallel_to_plane {
             for curve in &out.curves_3d {
-                let Some(bound) = curve_plane_deviation(curve, plane) else {
+                let Some(bound) = plane.curve_deviation(curve) else {
                     return Ok(ExtrusionIntersection::needs_more());
                 };
                 deviation = deviation.max(bound);
@@ -1303,14 +1318,11 @@ impl SurfOfExtrusion {
 
         // set output
         let cnt = out.curves_3d.len();
-        for ii in 0..cnt {
+        for (ii, crv) in out.curves_3d.iter().enumerate() {
             out.surface1_uv_curves.push(None);
             out.surface2_uv_curves.push(None);
             // Line solutions have already added the curve types
             if cnt != out.curve_types.len() {
-                let crv = out.curves_3d.get(ii).ok_or_else(|| {
-                    SolidError::surface_failed(OP_PLANE, "an intersection curve is missing")
-                })?;
                 let t = if crv.is_degenerate(k, EFF_ZERO, None)? {
                     TsectCurveType::Touching
                 } else {
@@ -1464,7 +1476,10 @@ impl SurfOfExtrusion {
             if !other_vec.is_parallel_to(self.extrusion_vec, crate::math::EFF_ZERO_RAD) {
                 return Ok(true);
             }
-            return Err(SolidError::surface_missing(op, "the other generator curve"));
+            return Err(SolidError::surface(
+                op,
+                SurfaceFailure::SurfaceWithoutGenerator,
+            ));
         };
         // (status ignored upstream: every failure comes after sm_IntersectGenerators
         // cleared the needs-more flag, and keeps the curves and types it already
@@ -1603,14 +1618,23 @@ impl SurfOfExtrusion {
         // test every end curve controlPoint for constant sweep vectors
         let weight = |w: &[f64], i: usize| -> Result<f64> {
             w.get(i).copied().ok_or_else(|| {
-                SolidError::surface_failed(OP_IS_NURB, "an end curve weight is missing")
+                SolidError::surface(
+                    OP_IS_NURB,
+                    SurfaceFailure::Defect {
+                        why: "an iso curve of the rational surface has no weight at a control \
+                              point, though a rational net's iso curves carry one at each",
+                    },
+                )
             })
         };
         for (i, end_pt) in end_ctrl_pts.iter().enumerate() {
             let start_pt = start_ctrl_pts.get(i).ok_or_else(|| {
-                SolidError::surface_failed(
+                SolidError::surface(
                     OP_IS_NURB,
-                    "the start curve has fewer control points than the end curve",
+                    SurfaceFailure::Defect {
+                        why: "the start iso curve has fewer control points than the end one, \
+                              though both are iso curves of one net in the same direction",
+                    },
                 )
             })?;
 
@@ -1696,9 +1720,9 @@ impl SurfOfExtrusion {
 
         // check input - new trim UV domain must be inside current natural UV domain
         if !new_nurb_uv_domain.is_contained_by(&current_nurb_uv_domain, EFF_ZERO_PARAM) {
-            return Err(SolidError::surface_failed(
+            return Err(SolidError::surface(
                 OP_TRIM,
-                "the trim domain is outside the natural domain",
+                SurfaceFailure::TrimDomainOutside,
             ));
         }
 
@@ -2101,9 +2125,10 @@ mod tests {
             assert_eq!(error.operation(), OP_GLOBAL);
             assert!(matches!(
                 error.surface_failure(),
-                Some(crate::error::surface::SurfaceFailure::Failed(reason))
-                    if reason.contains("certified plane crossing") && reason.contains("zero tolerance")
+                Some(SurfaceFailure::Defect { why })
+                    if why.contains("end signs prove it crosses the plane")
             ));
+            assert!(error.is_defect());
         };
         for target in [
             IntersectTarget::Plane(&plane),
@@ -2179,7 +2204,7 @@ mod tests {
     #[test]
     fn parallel_coplanar_sweep_intersection_is_not_duplicated() {
         let k = k();
-        for (finite, drift) in [(false, 0.0), (true, 0.0), (true, 2.0_f64.powi(-44))] {
+        for (finite, drift) in [(false, 0.0), (true, 0.0), (true, det::powi(2.0_f64, -44))] {
             let mut s = swept(
                 &k,
                 &[(-1.0, -1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 1.0, 0.0)],
@@ -2237,7 +2262,7 @@ mod tests {
     #[test]
     fn parallel_coplanar_sweep_respects_reparameterized_source_domain() {
         let k = k();
-        let drift = 2.0_f64.powi(-44);
+        let drift = det::powi(2.0_f64, -44);
         let mut s = swept(
             &k,
             &[(-1.0, -1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 1.0, 0.0)],
@@ -3623,7 +3648,7 @@ mod tests {
         let dom = Extent2d::from_bounds(o, o, o + 10.0, o + 10.0);
         let plane = rotated_plane(dom);
         let th: f64 = 2.68865247675069297;
-        let euv = (th.cos(), th.sin());
+        let euv = (det::cos(th), det::sin(th));
         // Work relative to the box origin so the expected area does not lose
         // precision by subtracting products of coordinates near 1e6.
         let mu = |p: Point2| -euv.1 * (p.x - o) + euv.0 * (p.y - o);
@@ -3746,7 +3771,7 @@ mod tests {
     #[test]
     fn parallel_patch_deviation_covers_profile_and_sweep() {
         let k = k();
-        let residual = 2.0_f64.powi(-44);
+        let residual = det::powi(2.0_f64, -44);
         for (e, vmin, domain, expected) in [
             (
                 Vec3::new(residual, 0.0, 1.0),
@@ -3807,7 +3832,7 @@ mod tests {
     #[test]
     fn slab_merges_a_far_cut_corner_into_the_corner() {
         let k = k();
-        let d = 2f64.powi(-10);
+        let d = det::powi(2f64, -10);
         for x0 in [0.0, 1e12] {
             let dom = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
             let mut plane = Plane::new(
@@ -3906,7 +3931,7 @@ mod tests {
         } else {
             xy_plane(dom)
         };
-        let euv = (th.cos(), th.sin());
+        let euv = (det::cos(th), det::sin(th));
         let mu = |p: (f64, f64)| -euv.1 * p.0 + euv.0 * p.1;
         let corners = [
             (o, o),
@@ -4073,7 +4098,7 @@ mod tests {
         let dom = Extent2d::from_bounds(0.0, 0.0, 1e-3, 1e-3);
         let plane = xy_plane(dom);
         let th = std::f64::consts::FRAC_PI_6;
-        let (sn, cs) = th.sin_cos();
+        let (sn, cs) = det::sin_cos(th);
         let mu = |p: (f64, f64)| -sn * p.0 + cs * p.1;
         let at_mu = |u: f64, m: f64| (u, (m + sn * u) / cs);
         let (a, c, b) = (at_mu(5e-4, 1e-10), at_mu(6e-4, -2e-4), at_mu(3e-4, -1e-4));
@@ -4120,7 +4145,12 @@ mod tests {
         let d = s.base().natural_uv_domain();
         let mut big = d;
         big.expand_absolute(1.0);
-        assert!(s.trim_with_domain(&k, &big).is_err());
+        let e = s.trim_with_domain(&k, &big).unwrap_err();
+        assert_eq!(
+            e.surface_failure(),
+            Some(&SurfaceFailure::TrimDomainOutside)
+        );
+        assert_eq!(e.kind(), crate::error::ErrorKind::OutsideDomain);
         assert!(s.trim_with_domain(&k, &d).is_ok());
     }
 

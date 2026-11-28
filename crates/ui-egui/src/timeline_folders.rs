@@ -88,12 +88,14 @@ impl Folders {
         self.names.get(&id).map_or("Folder", String::as_str)
     }
 
-    /// The deepest folder whose run holds the slot between features `slot - 1` and `slot` (a
-    /// slot at a folder's edge is outside it), as a dropped feature joins it.
-    pub(crate) fn at_slot(&self, slot: usize) -> Option<u64> {
+    /// The deepest folder whose run holds the slot between features `slot - 1` and `slot`, as a
+    /// dropped feature joins it. A slot at a folder's edge is outside it, except the first slot
+    /// of a folder in `past` (open, dropped on its chip or after it), so a folder of one feature
+    /// takes drops too (#18471).
+    pub(crate) fn at_slot(&self, slot: usize, past: &[u64]) -> Option<u64> {
         let mut level = &self.spans;
         let mut found = None;
-        while let Some(span) = level.iter().find(|s| s.start < slot && slot < s.end) {
+        while let Some(span) = level.iter().find(|s| slot < s.end && (s.start < slot || (s.start == slot && past.contains(&s.id)))) {
             found = Some(span.id);
             level = &span.children;
         }
@@ -277,7 +279,7 @@ pub(crate) fn folder_chip(
     if response.clicked() {
         set_open(app, folder.id, !folder.open);
     }
-    crate::ui_kit::Menu::context(&response, |ui| folder_menu(app, ui, folder, &history.view, rect.left_bottom()));
+    folder_menu(app, &response, folder, &history.view, rect.left_bottom());
     rect.width()
 }
 
@@ -286,41 +288,53 @@ fn counted(n: usize, thing: &str) -> String {
     if n == 1 { format!("1 {thing}") } else { format!("{n} {thing}s") }
 }
 
-fn folder_menu(app: &mut SolveApp, ui: &mut egui::Ui, folder: &Folder, view: &crate::timeline_fold::View, at: egui::Pos2) {
-    let fold = if folder.open { "Fold Features" } else { "Show Each Feature" };
-    if crate::ui_kit::menu::button(ui, fold, "list").clicked() {
-        set_open(app, folder.id, !folder.open);
-        ui.close();
+fn folder_menu(app: &mut SolveApp, response: &egui::Response, folder: &Folder, view: &crate::timeline_fold::View, at: egui::Pos2) {
+    if !crate::ui_kit::Menu::context_active(response) {
+        return;
     }
-    if crate::ui_kit::menu::button(ui, "Rename", "rename").clicked() {
-        crate::context_menu::start_rename(app, crate::context_menu::RenameWhat::TimelineGroup(folder.id), at);
-        ui.close();
-    }
-    crate::timeline::edit_holes_item(app, ui, folder.id);
-    if crate::ui_kit::menu::button(ui, "Ungroup", "feature_group").backing_on_hover_text("Keep its features and folders in the history").clicked() {
-        app.tree.picked_timeline_groups.retain(|g| *g != folder.id);
-        let _ = app.run("timeline.ungroup", json!({ "group": folder.id }));
-        ui.close();
-    }
-    ui.separator();
-    if crate::ui_kit::menu::button(ui, "Select Features", "select").clicked() {
-        let features = &app.session.doc.features;
-        let items: Vec<_> = view
-            .indices(folder.start, folder.end)
-            .into_iter()
-            .filter_map(|i| features.get(i))
-            .map(|f| json!({"type": "feature", "id": f.id}))
-            .collect();
-        app.tree.picked_joints.clear();
-        app.tree.picked_timeline_groups.clear();
-        let _ = app.run("select.set", json!({ "items": items }));
-        ui.close();
-    }
-    if crate::ui_kit::menu::button(ui, "Roll History Marker Here", "rollback").clicked() {
-        let end = view.index(folder.end);
-        let position = if end >= app.session.doc.features.len() { json!({}) } else { json!({ "position": end }) };
-        let _ = app.run_heavy("timeline.roll_to", position);
-        ui.close();
+    use crate::ui_kit::Item;
+    let mut items = vec![
+        Item::action("fold", if folder.open { "Fold Features" } else { "Show Each Feature" }, "list"),
+        Item::action("rename", "Rename", "rename"),
+    ];
+    items.extend(crate::timeline::edit_holes_item(app, folder.id));
+    let mut ungroup = Item::action("ungroup", "Ungroup", "feature_group");
+    ungroup.tip = Some("Keep its features and folders in the history".into());
+    items.extend([
+        ungroup,
+        Item::sep(),
+        Item::action("select", "Select Features", "select"),
+        Item::action("roll", "Roll History Marker Here", "rollback"),
+    ]);
+    if let Some(picked) = crate::ui_kit::Menu::context_items(response, &items) {
+        match picked.id.as_str() {
+            "fold" => set_open(app, folder.id, !folder.open),
+            "rename" => crate::context_menu::start_rename(app, crate::context_menu::RenameWhat::TimelineGroup(folder.id), at),
+            "ungroup" => {
+                app.tree.picked_timeline_groups.retain(|g| *g != folder.id);
+                let _ = app.run("timeline.ungroup", json!({"group":folder.id}));
+            }
+            "select" => {
+                let features = &app.session.doc.features;
+                let items: Vec<_> = view
+                    .indices(folder.start, folder.end)
+                    .into_iter()
+                    .filter_map(|i| features.get(i))
+                    .map(|f| json!({"type":"feature","id":f.id}))
+                    .collect();
+                app.tree.picked_joints.clear();
+                app.tree.picked_timeline_groups.clear();
+                let _ = app.run("select.set", json!({"items":items}));
+            }
+            "roll" => {
+                let end = view.index(folder.end);
+                let position = if end >= app.session.doc.features.len() { json!({}) } else { json!({"position":end}) };
+                let _ = app.run_heavy("timeline.roll_to", position);
+            }
+            _ => {
+                crate::timeline::run_holes_item(app, &picked);
+            }
+        }
     }
 }
 
@@ -328,9 +342,10 @@ fn folder_menu(app: &mut SolveApp, ui: &mut egui::Ui, folder: &Folder, view: &cr
 /// out of every folder), else `timeline.move_many` into the folder the slot is in (or out of
 /// folders), so a feature dropped between an open folder's features joins it.
 /// `active`: the drop lands before the history marker, which sits at `marker_slot`; crossing it
-/// rolls the feature back or forward in the same step.
-pub(crate) fn drop_feature(app: &mut SolveApp, folders: &Folders, id: u64, slot: usize, active: bool, marker_slot: usize) {
-    let target = folders.at_slot(slot);
+/// rolls the feature back or forward in the same step. `past`: the open folders whose chip the
+/// drop is on or right of.
+pub(crate) fn drop_feature(app: &mut SolveApp, folders: &Folders, id: u64, slot: usize, active: bool, marker_slot: usize, past: &[u64]) {
+    let target = folders.at_slot(slot, past);
     let from = app.session.doc.feature_index(id).unwrap_or(0);
     let home = app.session.doc.timeline_groups.iter().find(|g| g.features.contains(&id)).map(|g| g.id);
     if home == target {

@@ -29,6 +29,7 @@
 use super::geometry::{Curve, Frame, Surface};
 use super::vec::VecExt;
 use super::{CurveEval, EvalError, SurfaceEval};
+use crate::math::det;
 use crate::math::Vec3;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_8, TAU};
 
@@ -51,11 +52,11 @@ pub fn winds([u, _]: [[f64; 2]; 2]) -> bool {
 /// arc with ends `±π/4` from its bisector and middle weight `cos π/4` has
 /// `tan((ψ − π/4)/2) = tan(π/8)(2u − 1)`.
 fn quarter_u(psi: f64) -> f64 {
-    0.5 * (1.0 + (0.5 * psi - FRAC_PI_8).tan() / FRAC_PI_8.tan())
+    0.5 * (1.0 + det::tan(0.5 * psi - FRAC_PI_8) / det::tan(FRAC_PI_8))
 }
 
 fn quarter_psi(u: f64) -> f64 {
-    2.0 * (((2.0 * u - 1.0) * FRAC_PI_8.tan()).atan() + FRAC_PI_8)
+    2.0 * (det::atan((2.0 * u - 1.0) * det::tan(FRAC_PI_8)) + FRAC_PI_8)
 }
 
 /// The quarter an angle lies in (an angle on a quarter's end lies in the one after it).
@@ -168,8 +169,8 @@ fn arcs_between(a0: f64, a1: f64) -> Option<(Vec<f64>, Vec<([f64; 2], f64)>)> {
     }
     let n = ((span / FRAC_PI_2) - 1e-9).ceil().max(1.0) as usize;
     let phi = span / n as f64;
-    let w = (0.5 * phi).cos();
-    let at = |a: f64| [a.cos(), a.sin()];
+    let w = det::cos(0.5 * phi);
+    let at = |a: f64| [det::cos(a), det::sin(a)];
     let mut pts = Vec::new();
     let mut knots = vec![0.0; 3];
     for k in 0..n {
@@ -222,7 +223,7 @@ fn face_arcs(
         let at = |t: f64| {
             let k = ((t - a0) / phi).floor().clamp(0.0, n - 1.0);
             let psi = (t - a0 - k * phi).clamp(0.0, phi);
-            k + 0.5 * (1.0 + (0.5 * psi - 0.25 * phi).tan() / (0.25 * phi).tan())
+            k + 0.5 * (1.0 + det::tan(0.5 * psi - 0.25 * phi) / det::tan(0.25 * phi))
         };
         return Some((made, [at(a[0]), at(a[1])]));
     }
@@ -233,7 +234,7 @@ fn face_arcs(
 /// Quarter arcs from quarter `q0`, `n` of them: their knot vector (in form parameter) and their
 /// control points (as `(cos, sin)` factors on the unit circle's plane) with weights.
 fn arcs(q0: f64, n: usize) -> (Vec<f64>, Vec<([f64; 2], f64)>) {
-    let at = |a: f64| [a.cos(), a.sin()];
+    let at = |a: f64| [det::cos(a), det::sin(a)];
     let mut pts = Vec::new();
     let mut knots = vec![q0; 3];
     for k in 0..n {
@@ -380,7 +381,7 @@ fn reaches(s: &Surface, v: [f64; 2], tolerance: f64) -> (f64, f64) {
             half_angle,
             ..
         } => {
-            let slope = half_angle.tan();
+            let slope = det::tan(*half_angle);
             (
                 reach(
                     v.iter()
@@ -409,7 +410,9 @@ fn reaches(s: &Surface, v: [f64; 2], tolerance: f64) -> (f64, f64) {
 /// than one turn then has a form past one turn (a NURBS that covers part of its surface twice); a
 /// whole turn has a form of four quarters from the one it starts in, which ends short of the
 /// face's seam, so the seam's second use lies off the form. [`turned`] puts its start on a quarter
-/// line. `None` for another surface.
+/// line. A whole turn's start is on a quarter line only as its seam circle's is ([`conic`], no
+/// tolerance reach): its seam is a whole-turn circle on the same grid, whose form needs a fifth
+/// quarter whenever it starts off the line, however close. `None` for another surface.
 pub fn turn_quarters(s: &Surface, [u, v]: [[f64; 2]; 2], tolerance: f64) -> Option<usize> {
     if !matches!(
         s,
@@ -420,7 +423,12 @@ pub fn turn_quarters(s: &Surface, [u, v]: [[f64; 2]; 2], tolerance: f64) -> Opti
     ) {
         return None;
     }
-    Some(quarters(u, reaches(s, v, tolerance).0)?.1)
+    let reach = if u[1] - u[0] >= TAU * (1.0 - TURN_ROUNDING) {
+        0.0
+    } else {
+        reaches(s, v, tolerance).0
+    };
+    Some(quarters(u, reach)?.1)
 }
 
 /// A cylinder, cone, sphere or torus with its frame turned by `angle` about its own axis (its x
@@ -429,7 +437,7 @@ pub fn turn_quarters(s: &Surface, [u, v]: [[f64; 2]; 2], tolerance: f64) -> Opti
 pub fn turned(s: &Surface, angle: f64) -> Option<Surface> {
     let turn = |f: &Frame| -> Option<Frame> {
         let (o, x, _, z) = axes(f)?;
-        let (sin, cos) = angle.sin_cos();
+        let (sin, cos) = det::sin_cos(angle);
         let nx = x * cos + z.cross(x) * sin;
         let ny = z.cross(nx);
         Some(Frame {
@@ -704,7 +712,7 @@ fn surface_on(
             radius_at_origin,
             half_angle,
         } => {
-            let slope = half_angle.tan();
+            let slope = det::tan(*half_angle);
             let homogeneous = net(frame, &line, &|[h, _]| (radius_at_origin + h * slope, h))?;
             Some((
                 Surface::RationalSpline {
@@ -736,7 +744,7 @@ fn surface_on(
         } => {
             let ((v_knots, tube), fv) = face_arcs(v, reach_v, own, false)?;
             // The tube's arcs turned on by its start (a rotation of the control points, exact).
-            let (ts, tc) = tube_start.sin_cos();
+            let (ts, tc) = det::sin_cos(*tube_start);
             let homogeneous = net(frame, &tube, &|[c, s]| {
                 (
                     major_radius + minor_radius * (c * tc - s * ts),
@@ -777,7 +785,7 @@ pub fn on_frame(
     }
     let nx = (fx - z * fx.dot(z)).normalized()?;
     let ny = z.cross(nx);
-    let shift = x.dot(ny).atan2(x.dot(nx));
+    let shift = det::atan2(x.dot(ny), x.dot(nx));
     let relabel = Frame {
         origin: [o.x, o.y, o.z],
         x_axis: [nx.x, nx.y, nx.z],
@@ -828,10 +836,10 @@ pub fn on_tube(
     {
         return None;
     }
-    let (s, cs) = tube_start.sin_cos();
+    let (s, cs) = det::sin_cos(*tube_start);
     let nx = (radial * cs + fz * s).normalized()?;
     let ny = z.cross(nx);
-    let shift = x.dot(ny).atan2(x.dot(nx));
+    let shift = det::atan2(x.dot(ny), x.dot(nx));
     let relabel = Frame {
         origin: [o.x, o.y, o.z],
         x_axis: [nx.x, nx.y, nx.z],
@@ -865,7 +873,7 @@ pub fn tube_on_grid(
     };
     let (_, ax, _, _) = axes(&a)?;
     let (_, bx, by, _) = axes(&b)?;
-    let turn = ax.dot(by).atan2(ax.dot(bx));
+    let turn = det::atan2(ax.dot(by), ax.dot(bx));
     let off = turn - (turn / FRAC_PI_2).round() * FRAC_PI_2;
     Some(off.abs() <= 1e-9)
 }
@@ -1121,6 +1129,9 @@ fn extent_raw(
         // is free there too), the directions a pole it passes collapses, the pole it is on, and
         // the jump each crossing makes by the loop's side ([`pole_jump`]).
         let (mut wraps, mut passes) = (false, [false; 2]);
+        // Whether a crossing comes out half a turn round from where it went in ([`half_turn`]):
+        // the nearest branch is then no answer.
+        let mut half = false;
         let mut pole_at: Option<([f64; 2], [bool; 2])> = None;
         let mut jumps: Vec<[f64; 2]> = Vec::new();
         for (c, [t0, t1], forward) in l {
@@ -1277,7 +1288,10 @@ fn extent_raw(
                         crossings += 1;
                         on_pole = false;
                         let jump = match (prev, pole_at) {
-                            (Some(a), Some(on)) => pole_jump(a, q, on, period),
+                            (Some(a), Some(on)) => {
+                                half |= half_turn(&eval, a, q, on, period, reach);
+                                pole_jump(a, q, on, period)
+                            }
                             _ => [0.0; 2],
                         };
                         jumps.push(jump);
@@ -1345,14 +1359,19 @@ fn extent_raw(
         // whatever its turns are, so closing it says nothing. Where it also runs along an edge
         // both ways (a seam: the face spans the whole turn there), each crossing turns the way
         // the face's side says instead ([`pole_jump`]). A loop with no seam (a narrow lune, up
-        // one meridian and down another) keeps closing: its width is the one it shows.
+        // one meridian and down another) keeps closing: its width is the one it shows. A lune
+        // half a turn wide (a half sphere whose rim is a meridian circle, both its halves a lune
+        // of the same width) shows no width of its own: the nearest branch past each pole is a
+        // tie that rounding settles, and either half could come out. It turns the way the
+        // face's side says too.
         wraps |= on_pole;
         let by_side = crossings + usize::from(wraps) >= 2
-            && l.iter().enumerate().any(|(i, (c, t, f))| {
-                l.iter()
-                    .skip(i + 1)
-                    .any(|(c2, t2, f2)| f != f2 && t == t2 && c == c2)
-            });
+            && (half
+                || l.iter().enumerate().any(|(i, (c, t, f))| {
+                    l.iter()
+                        .skip(i + 1)
+                        .any(|(c2, t2, f2)| f != f2 && t == t2 && c == c2)
+                }));
         // The turn the points past each crossing are moved by: none before the first.
         let turned: Vec<[f64; 2]> = std::iter::once([0.0; 2])
             .chain(jumps.iter().scan([0.0; 2], |s, j| {
@@ -1468,6 +1487,38 @@ fn extent_raw(
         }
     }
     Some((lo, hi))
+}
+
+/// Whether a loop through a pole comes out of it half a turn round from where it went in, so
+/// that neither way round is the shorter: `a` the last point before the pole, `b` the first after,
+/// `p` the pole's parameters and `collapsed` the directions collapsed there (as [`pole_jump`]).
+/// Half a turn to within rounding and the angle `reach` (the face's tolerance) makes at the nearer
+/// of the two points, each a tolerance off its place, taken at its distance from the pole (no
+/// more than its distance from the axis there, so the angle is no smaller than it should be).
+fn half_turn(
+    eval: &SurfaceEval,
+    a: [f64; 2],
+    b: [f64; 2],
+    (p, collapsed): ([f64; 2], [bool; 2]),
+    period: [Option<f64>; 2],
+    reach: f64,
+) -> bool {
+    let (Some(pa), Some(pb), Some(pole)) = (eval.point(a), eval.point(b), eval.point(p)) else {
+        return false;
+    };
+    let near = pa.dist(pole).min(pb.dist(pole));
+    if !(near > 0.0) {
+        return false;
+    }
+    let angle = 2.0 * det::asin((reach.max(0.0) / near).min(1.0));
+    (0..2).any(|d| {
+        let per = ix(&period, d).filter(|p| p.is_finite() && *p > 0.0);
+        let (true, Some(per)) = (ix(&collapsed, d), per) else {
+            return false;
+        };
+        let gap = (ix(&b, d) - ix(&a, d)).rem_euclid(per);
+        (gap - 0.5 * per).abs() <= per * TURN_ROUNDING + angle
+    })
 }
 
 /// The whole periods a loop's points after a pole are moved by: `a` the last point before it,

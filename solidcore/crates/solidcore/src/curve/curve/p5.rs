@@ -117,7 +117,8 @@ use crate::curve::curve::p4::{
 };
 use crate::curve::curve_cache::{CurveCache, CurveCacheOptions};
 use crate::curve::ellipse::Ellipse;
-use crate::error::{ignore_status, ignored, Result, SolidError};
+use crate::error::curve::{CurveFailure, FunctionGap, PropertyOption};
+use crate::error::{ignore_status, ignored, Failure, Result, SolidError};
 use crate::geom::a_object::{CacheId, ObjectCacheType};
 use crate::geom::axis2_placement::Axis2Placement;
 use crate::geom::extent1d::Extent1d;
@@ -135,6 +136,7 @@ use crate::geom::solution_array::{Solution, SolutionType};
 use crate::geom::tol::are_same;
 use crate::geom::vector3d::{acos, sqrt, Point3, Vec3};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{max2, BIG_DOUBLE, EFF_ZERO, EFF_ZERO_SQ, EFF_ZERO_SQRT, PI};
 use crate::nurbs::b_spline_curve::p2::ArcData;
 use crate::nurbs::b_spline_curve::speed::SpanSpeed;
@@ -207,7 +209,11 @@ pub fn is_line_base(
                     pt_vec[1] = d;
                 }
             }
-            Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+            Err(
+                e @ (SolidError::Unported { .. }
+                | SolidError::Cancelled { .. }
+                | SolidError::OutOfFuel { .. }),
+            ) => return Err(e),
             Err(_) => {}
         }
         pt1 = pt_vec[0];
@@ -1428,10 +1434,7 @@ pub fn validate_curve_cache(
 ) -> Result<Option<CacheId>> {
     // when requested ObjectCache Type is not Curve return NULL
     if cache_type != ObjectCacheType::Curve {
-        return Err(SolidError::curve_failed(
-            OP_CACHE,
-            "the cache asked for is not a curve cache",
-        ));
+        return Err(SolidError::curve(OP_CACHE, CurveFailure::CacheTypeNotCurve));
     }
     // low work - use OldCache when its given
     Ok(old)
@@ -1917,9 +1920,12 @@ impl Curve {
                     // upstream (`TRUE`).
                     let pv = bsp.evaluate(k, t, 1, t != seg_ivl.max(), false)?;
                     pv.get(1).map(|v| v.length()).ok_or_else(|| {
-                        SolidError::curve_failed(
+                        SolidError::curve(
                             "curve::length",
-                            "the evaluation gave no first derivative",
+                            CurveFailure::Defect {
+                                why: "an evaluation asked for one derivative returns the \
+                                      point and that derivative",
+                            },
                         )
                     })
                 },
@@ -1990,7 +1996,7 @@ fn circle_length(e: &Ellipse, interval: &Extent1d) -> Result<Option<f64>> {
             first + Vec3::new(from[0], from[1], from[2]),
             first + Vec3::new(to[0], to[1], to[2]),
         );
-        angle += from.cross(to).length().atan2(from.dot(to));
+        angle += det::atan2(from.cross(to).length(), from.dot(to));
     }
     Ok(Some(radius * angle))
 }
@@ -2071,7 +2077,11 @@ pub fn local_property_analysis<C: CurveEvaluate + ?Sized, O: Copy>(
         Ok(o) => o,
         Err(e) if e.is_unported_or_cancelled() => return Err(e),
         // Something went wrong in 1d solver return error
-        Err(_) => return Err(SolidError::curve_failed(OP_LPA, "the 1D solver failed")),
+        Err(e) => {
+            return Err(Failure::new(OP_LPA, CurveFailure::LocalSolveFailed)
+                .caused_by(e)
+                .into_error())
+        }
     };
     let mut found_t = outcome.t;
 
@@ -2186,10 +2196,9 @@ fn projected_maximum_at<C: CurveEvaluate + ?Sized>(
     match efo.evaluate(t, &mut at_root, true) {
         Ok(()) => Ok(at_root.f_prime >= 0.0),
         Err(e) if e.is_unported_or_cancelled() => Err(e),
-        Err(_) => Err(SolidError::curve_failed(
-            OP_LPA,
-            "the function could not be evaluated at the root",
-        )),
+        Err(e) => Err(Failure::new(OP_LPA, CurveFailure::RootNotEvaluated { t })
+            .caused_by(e)
+            .into_error()),
     }
 }
 
@@ -2306,7 +2315,11 @@ fn projected_maximum_from_samples<C: CurveEvaluate + ?Sized>(
     let outcome = match ls.solve_it(efo, 0.5 * (lower + upper), EFF_ZERO_SQRT) {
         Ok(o) => o,
         Err(e) if e.is_unported_or_cancelled() => return Err(e),
-        Err(_) => return Err(SolidError::curve_failed(OP_LPA, "the 1D solver failed")),
+        Err(e) => {
+            return Err(Failure::new(OP_LPA, CurveFailure::LocalSolveFailed)
+                .caused_by(e)
+                .into_error())
+        }
     };
     if outcome.found && projected_maximum_at(efo, outcome.t)? {
         return Ok(Some(outcome.t));
@@ -2455,9 +2468,9 @@ impl<C1: CurveEvaluate + ?Sized, C2: CurveEvaluate + ?Sized> FindCcNormalEnfo<'_
     /// # Errors
     ///
     /// `SM_ERR` for (nearly) zero tangents, a missing option vector where upstream
-    /// checks it, a projected gap below the tolerance (projected tangency), a
-    /// failed unitization (at distance) or a second curve that is not a curve on a
-    /// surface (surface projected intersection); `InvalidInput` for `x` or `f`
+    /// checks it, a projected gap below the tolerance (projected tangency) or a
+    /// second curve that is not a curve on a surface (surface projected
+    /// intersection); `InvalidInput` for `x` or `f`
     /// shorter than 2 and for a missing pivot point (signed pivot, which upstream
     /// reads unchecked); those of the evaluations and of the Jacobian writes.
     #[allow(clippy::too_many_lines)] // one upstream function, one branch per operation
@@ -2481,9 +2494,11 @@ impl<C1: CurveEvaluate + ?Sized, C2: CurveEvaluate + ?Sized> FindCcNormalEnfo<'_
             self.opt_vectors
                 .and_then(|v| v.get(i).copied())
                 .ok_or_else(|| {
-                    SolidError::curve_failed(
+                    SolidError::curve(
                         OP_NORMAL,
-                        "the property function has no option vectors",
+                        CurveFailure::PropertyOptionMissing {
+                            option: PropertyOption::Vectors,
+                        },
                     )
                 })
         };
@@ -2508,9 +2523,10 @@ impl<C1: CurveEvaluate + ?Sized, C2: CurveEvaluate + ?Sized> FindCcNormalEnfo<'_
         let tan_len_sq2 = pvv2[1].length_squared();
 
         if tan_len_sq1 < EFF_ZERO_SQ || tan_len_sq2 < EFF_ZERO_SQ {
-            return Err(SolidError::curve_failed(
+            let t = if tan_len_sq1 < EFF_ZERO_SQ { x0 } else { x1 };
+            return Err(SolidError::curve(
                 OP_NORMAL,
-                "a curve has a zero-length tangent",
+                CurveFailure::ZeroTangent { t },
             ));
         }
 
@@ -2564,9 +2580,12 @@ impl<C1: CurveEvaluate + ?Sized, C2: CurveEvaluate + ?Sized> FindCcNormalEnfo<'_
 
                 // If projection of vector between curves is too small just error out
                 if v.length_squared() < self.squared_tolerance {
-                    return Err(SolidError::curve_failed(
+                    return Err(SolidError::curve(
                         OP_NORMAL,
-                        "the projected vector between the curves is too short",
+                        CurveFailure::FunctionUndefined {
+                            t: x0,
+                            why: FunctionGap::ProjectedGapShort,
+                        },
                     ));
                 }
 
@@ -2689,12 +2708,10 @@ impl<C1: CurveEvaluate + ?Sized, C2: CurveEvaluate + ?Sized> FindCcNormalEnfo<'_
                 // fun[1] = (g-f)^2 - c^2
                 let vec_g_minus_f = pvv2[0] - pvv1[0];
 
-                let _ufp = pvv1[1].unitize().map_err(|_| {
-                    SolidError::curve_failed(OP_NORMAL, "a curve's tangent does not unitize")
-                })?;
-                let ugp = pvv2[1].unitize().map_err(|_| {
-                    SolidError::curve_failed(OP_NORMAL, "a curve's tangent does not unitize")
-                })?;
+                // (both squared lengths are at least SM_EFF_ZERO_SQ, checked above, the bound
+                // under which Unitize fails, so the tangents unitize)
+                let _ufp = pvv1[1].unitize_or_z();
+                let ugp = pvv2[1].unitize_or_z();
                 let _ufpp = pvv1[1].unitized_derivative(pvv1[2]);
                 let ugpp = pvv2[1].unitized_derivative(pvv2[2]);
 
@@ -2766,9 +2783,9 @@ impl<C1: CurveEvaluate + ?Sized, C2: CurveEvaluate + ?Sized> FindCcNormalEnfo<'_
 
             SolverOperation::SurfaceProjectedIntersect => {
                 let Some(crv_on_surf) = self.curve2.as_crv_on_surf() else {
-                    return Err(SolidError::curve_failed(
+                    return Err(SolidError::curve(
                         OP_NORMAL,
-                        "the second curve is not a curve on a surface",
+                        CurveFailure::SecondCurveNotOnSurface,
                     ));
                 };
 
@@ -3233,7 +3250,7 @@ mod tests {
         let mut pts: Vec<Point3> = (0..8)
             .map(|i| {
                 let t = core::f64::consts::PI * f64::from(i) / 4.0;
-                Point3::new(5.0 * t.cos(), 3.0 * t.sin(), 0.5 * t)
+                Point3::new(5.0 * det::cos(t), 3.0 * det::sin(t), 0.5 * t)
             })
             .collect();
         pts.push(pts[0]);

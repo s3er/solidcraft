@@ -42,7 +42,10 @@ pub(super) fn show_combo<R>(
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<Option<R>> {
     if !crate::blur::enabled() {
-        return combo.show_ui(ui, body);
+        return combo.show_ui(ui, |ui| {
+            ui.visuals_mut().widgets.noninteractive.bg_stroke = crate::Menu::separator_stroke(&Tokens::get());
+            body(ui)
+        });
     }
     let popup = widget.with("popup");
     let slot = egui::ComboBox::is_open(ui.ctx(), widget)
@@ -50,6 +53,7 @@ pub(super) fn show_combo<R>(
         .flatten();
     let mut host = None;
     let shown = combo.show_ui(ui, |ui| {
+        ui.visuals_mut().widgets.noninteractive.bg_stroke = crate::Menu::separator_stroke(&Tokens::get());
         // ComboBox calls us inside its ScrollArea, whose content Frame has no
         // fill and whose clip omits popup padding and any scrollbar. Its parent
         // owns the actual native popup Frame; finish using the final Area rect.
@@ -129,7 +133,13 @@ impl<'a> BackingPopup<'a> {
     pub fn get_expected_size(&self) -> Option<egui::Vec2> {
         self.0.get_expected_size()
     }
-    pub fn show<R>(self, body: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<R>> {
+    pub fn show<R>(mut self, body: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<R>> {
+        let layer = egui::LayerId::new(egui::Order::Foreground, self.0.get_id());
+        if crate::Menu::contains_pointer_in(self.0.ctx(), layer) {
+            // A shared submenu is part of this form's popup interaction. Its selected
+            // action still closes the owner explicitly through ui.close().
+            self.0 = self.0.close_behavior(egui::PopupCloseBehavior::IgnoreClicks);
+        }
         let slot =
             self.0.is_open().then(|| BackingSlot::reserve(self.0.ctx(), egui::LayerId::new(egui::Order::Foreground, self.0.get_id()))).flatten();
         self.0.show(|ui| match slot {

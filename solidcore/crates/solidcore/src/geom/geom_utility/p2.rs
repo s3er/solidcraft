@@ -77,6 +77,7 @@ use crate::geom::geom_utility::p1::{
 use crate::geom::matrix::Matrix;
 use crate::geom::tol::{in_tol, is_zero, ZONE_TOL_3D};
 use crate::geom::vector3d::{sqrt, Point3, Vec3};
+use crate::math::det;
 use crate::math::{max2, max3, rad_to_deg, EFF_ZERO, EFF_ZERO_SQ, EFF_ZERO_SQRT, PI};
 
 // ---- types ---------------------------------------------------------------------------
@@ -344,7 +345,11 @@ pub fn triangle_point_distance(
 
     let uv = match vec_lin_comb_two_vectors(vec_x, vec_y, test_vec) {
         Ok(uv) => uv,
-        Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+        Err(
+            e @ (SolidError::Unported { .. }
+            | SolidError::Cancelled { .. }
+            | SolidError::OutOfFuel { .. }),
+        ) => return Err(e),
         Err(_) => {
             // collinear points: nearest of the two edges from p0
             let (dist1, u) = segment_point_distance(p0, p1, test);
@@ -401,7 +406,11 @@ pub fn line_line_at_distance(
     const OP: &str = "geom::geom_utility::p2::line_line_at_distance";
     let (cl1, cl2) = match line_line_closest_point(line_pnt1, line_vec1, line_pnt2, line_vec2) {
         Ok(v) => v,
-        Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+        Err(
+            e @ (SolidError::Unported { .. }
+            | SolidError::Cancelled { .. }
+            | SolidError::OutOfFuel { .. }),
+        ) => return Err(e),
         Err(e) => return Err(SolidError::geom_call(OP)(e)),
     };
     let p1 = line_pnt1 + cl1 * line_vec1;
@@ -419,8 +428,8 @@ pub fn line_line_at_distance(
         ));
     }
     let half_proj = sqrt(at_distance * at_distance - dist_between * dist_between) / 2.0;
-    let dist_along_a = half_proj / beta.sin();
-    let dist_along_b = half_proj / (PI - beta).sin();
+    let dist_along_a = half_proj / det::sin(beta);
+    let dist_along_b = half_proj / det::sin(PI - beta);
     let scale1 = 1.0 / line_vec1.length();
     let a_on1 = dist_along_a * scale1;
     let b_on1 = dist_along_b * scale1;
@@ -615,7 +624,11 @@ pub fn segment_segment_intersect(
     let (mut param1, mut param2) =
         match line_line_closest_point(line_start, line_vec, other_start, other_vec) {
             Ok(v) => v,
-            Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+            Err(
+                e @ (SolidError::Unported { .. }
+                | SolidError::Cancelled { .. }
+                | SolidError::OutOfFuel { .. }),
+            ) => return Err(e),
             // parallel lines
             Err(_) => return Ok(points),
         };
@@ -719,7 +732,11 @@ pub fn segment_segment_closest_point(
     let (mut param1, mut param2) =
         match line_line_closest_point(line_start, line_vec, other_start, other_vec) {
             Ok(v) => v,
-            Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+            Err(
+                e @ (SolidError::Unported { .. }
+                | SolidError::Cancelled { .. }
+                | SolidError::OutOfFuel { .. }),
+            ) => return Err(e),
             // parallel lines
             Err(_) => return Ok(hits),
         };
@@ -842,7 +859,11 @@ pub fn sphere_circle_sphere_circle_intersect(
 
     let planes = match intersect_two_planes(cir1_center, cir1_normal, cir2_center, cir2_normal) {
         Ok(PlanesIntersection::Line { point, direction }) => Some((point, direction)),
-        Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+        Err(
+            e @ (SolidError::Unported { .. }
+            | SolidError::Cancelled { .. }
+            | SolidError::OutOfFuel { .. }),
+        ) => return Err(e),
         Ok(PlanesIntersection::Parallel { .. }) | Err(_) => None,
     };
     let Some((line_pt, line_vec)) = planes else {
@@ -858,7 +879,11 @@ pub fn sphere_circle_sphere_circle_intersect(
     let (mut count, mut params) =
         match line_intersect_sphere(line_pt, line_vec, sphere_center, sphere_radius, tol3d) {
             Ok(v) => v,
-            Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => return Err(e),
+            Err(
+                e @ (SolidError::Unported { .. }
+                | SolidError::Cancelled { .. }
+                | SolidError::OutOfFuel { .. }),
+            ) => return Err(e),
             // only for a zero line vector, which cannot happen here
             Err(_) => return Ok(CurveIntersection::Points(Vec::new())),
         };
@@ -1649,8 +1674,8 @@ mod tests {
         // a short tangent (|P'| 2e-6) with P'' near f64::MAX whose products cancel: the
         // curvature (0, 0, 1 / (2 a^2)) is finite, so the same evaluation on both sides is
         // C2 (scaling P' up alone would overflow the cross product to NaN)
-        let a = 1.5 * 2f64.powi(-20);
-        let big = 1.5 * 2f64.powi(1023);
+        let a = 1.5 * det::powi(2f64, -20);
+        let big = 1.5 * det::powi(2f64, 1023);
         let cancel = ev(v(a, a, 0.0), v(big, big, 1.0));
         assert_eq!(c(&cancel, &cancel), ContinuityType::C1C2);
 
@@ -1681,8 +1706,11 @@ mod tests {
         assert_eq!(pow2_unit_scale(1.0), 1.0);
         assert_eq!(pow2_unit_scale(1.5), 1.0);
         assert_eq!(pow2_unit_scale(-3.0), 0.5);
-        assert_eq!(pow2_unit_scale(0.0), 2f64.powi(1023));
-        assert_eq!(pow2_unit_scale(f64::MIN_POSITIVE / 4.0), 2f64.powi(1023));
+        assert_eq!(pow2_unit_scale(0.0), det::powi(2f64, 1023));
+        assert_eq!(
+            pow2_unit_scale(f64::MIN_POSITIVE / 4.0),
+            det::powi(2f64, 1023)
+        );
         assert_eq!(pow2_unit_scale(f64::MAX), f64::MIN_POSITIVE);
         assert_eq!(pow2_unit_scale(f64::INFINITY), f64::MIN_POSITIVE);
         assert_eq!(pow2_unit_scale(f64::NAN), f64::MIN_POSITIVE);
@@ -1694,19 +1722,19 @@ mod tests {
         }
         // 3-4-5 at 2^e for e from -1020 to 1020: exactly 5 * 2^e
         for e in (-1020..=1020).step_by(17) {
-            let p = 2f64.powi(e);
+            let p = det::powi(2f64, e);
             assert_eq!(scaled_length(v(3.0 * p, 4.0 * p, 0.0)), 5.0 * p);
         }
         // 2^e in four factors: exact across the whole range, overflow only past it
         let one = v(1.0, 0.0, 0.0);
         assert_eq!(times_pow2(one, 3068).x, f64::INFINITY);
         assert_eq!(
-            times_pow2(v(2f64.powi(-1022), 0.0, 0.0), 2045).x,
-            2f64.powi(1023)
+            times_pow2(v(det::powi(2f64, -1022), 0.0, 0.0), 2045).x,
+            det::powi(2f64, 1023)
         );
         assert_eq!(
-            times_pow2(v(2f64.powi(1023), 0.0, 0.0), -2045).x,
-            2f64.powi(-1022)
+            times_pow2(v(det::powi(2f64, 1023), 0.0, 0.0), -2045).x,
+            det::powi(2f64, -1022)
         );
         assert_eq!(times_pow2(one, -5).x, 1.0 / 32.0);
         assert_eq!(times_pow2(one, 0).x, 1.0);

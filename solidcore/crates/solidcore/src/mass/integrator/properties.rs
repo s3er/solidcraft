@@ -76,6 +76,7 @@ use crate::geom::extent2d::Extent2d;
 use crate::geom::extent3d::Extent3d;
 use crate::geom::tol::are_same;
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{Point3, Vec3, BIG_DOUBLE, EFF_ZERO, EFF_ZERO_SQ, PI};
 use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
@@ -258,7 +259,7 @@ pub fn curve_properties(
     }
     for (group, power) in POWERS.iter().enumerate() {
         let measure = if group < 4 { area_scale } else { volume_scale };
-        let moment_scale = measure * reach.powi(*power);
+        let moment_scale = measure * det::powi(reach, *power);
         for s in slots.by_ref().take(3) {
             *s = moment_scale;
         }
@@ -1343,7 +1344,7 @@ pub fn boundary_properties(
         if index == 0 {
             continue;
         }
-        let moment_scale = area_scale * length.powf(f64::from(power));
+        let moment_scale = area_scale * det::powf(length, f64::from(power));
         for cc in 0..3 {
             if let Some(s) = scale.get_mut(index - 1 + cc) {
                 *s = moment_scale;
@@ -1804,6 +1805,90 @@ fn nearest_on_edge(
 /// The grid of nearest points along each strip (see [`gap_closure`]).
 const CLOSURE_GRID: u32 = 64;
 
+/// Whether the strip from `trim` on a face of `surface` to the edge curve `curve` on
+/// `[e0, e1]` is polynomial of degree at most 2 along the trim between its breaks, for any
+/// correspondence linear there: the face a plane (a bilinear, non-rational patch), the
+/// trim a non-rational line in its uv (polynomial between its knots, which break the
+/// strip), so the trim's image is of degree 2 at most, and the edge non-rational of degree
+/// 1 or 2 with no knot inside `[e0, e1]`. A curve whose degree, weights or knots cannot be
+/// read is not shown polynomial, and its strip keeps the grid.
+fn polynomial_strip(
+    k: &Kernel,
+    surface: &Surface,
+    trim: &Curve,
+    curve: &Curve,
+    (e0, e1): (f64, f64),
+) -> bool {
+    use crate::surface::surface::SurfaceKind;
+    let straight_trim = matches!(trim.degree(), Ok(1)) && matches!(trim.is_rational(), Ok(false));
+    let polynomial_edge =
+        matches!(curve.degree(), Ok(1 | 2)) && matches!(curve.is_rational(), Ok(false));
+    let one_span = curve
+        .knots(k, Some(&Extent1d::from_min_max(e0, e1)))
+        .is_ok_and(|(knots, _)| !knots.iter().any(|&t| t > e0.min(e1) && t < e0.max(e1)));
+    matches!(surface.kind(), SurfaceKind::Plane(_)) && straight_trim && polynomial_edge && one_span
+}
+
+/// The points of a polynomial strip's ([`polynomial_strip`]) correspondence `table`
+/// (trim parameter, edge parameter; the grid of [`gap_closure`], ascending in the first)
+/// where it bends: its ends, and each point off the chord of the points kept either side
+/// of it by more than `EFF_ZERO` of the edge's parameter `span`. A run of points on its
+/// chord is one piece of the correspondence, not one per grid step: on a plane's straight
+/// edge, whose trim runs along it at its rate, the whole strip.
+///
+/// The closure the strip adds is then that of the grid to rounding. Its integrand (the
+/// volume group's `x . (X_tau x X_w)` up to the second moments' `x^2 x . (X_tau x X_w)`,
+/// `X = (1 - w) P + w E(S(tau))`) is a polynomial in `tau` of degree `5 m - 1 = 9` where
+/// the trim's image `P` and the edge's `E(S(tau))` are of degree `m = 2`, which the 7-point
+/// Kronrod rule (exact to degree 10) integrates exactly on every piece, so the run's
+/// integral is the same in one piece or in many. And the kept correspondence `S` is the
+/// table's `T` to within `d = EFF_ZERO span` (linear between their points, each dropped
+/// point within `d` of `S`'s chord through it; the ends the same): their strips share
+/// the trim's image, the edge and the end rulings, so the difference of their integrals of
+/// a field is the integral of its divergence over the region
+/// `H(tau, w, s) = (1 - w) P + w E(T + s (S - T))` between them (Stokes), with
+/// `|H_s| <= w |E'| d` and `|H_w| <= W + |E'| d` for a strip `W` wide: at most about
+/// `(L_P + L_E) (W + |E'| d) |E'| d / 2`, the `L` the lengths of the trim's image and of the
+/// edge, where `|E'| d` is about `EFF_ZERO` of the edge's length and `W` at most the edge's
+/// tolerance: `1e-12 tol R^2` on a body of size `R`, below the volume's rounding. (No width
+/// at the grid's points is no such certificate: a fitted edge and its fitted trim can
+/// meet at the grid's points and part between them, and an integrand that is not
+/// polynomial integrates to another value in one piece than in 64, within the
+/// integration's accuracy, not its rounding.)
+fn correspondence_bends(table: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
+    let tol = EFF_ZERO * span.abs();
+    // whether every point strictly between `a` and `z` lies within `tol` of their chord
+    // (a chord of no width in the trim's parameter keeps its points)
+    let on_chord = |a: usize, z: usize| -> bool {
+        let (Some(&(ta, sa)), Some(&(tz, sz))) = (table.get(a), table.get(z)) else {
+            return false;
+        };
+        let width = tz - ta;
+        if width.is_nan() || width <= 0.0 {
+            return false;
+        }
+        table.get(a + 1..z).is_some_and(|inner| {
+            inner.iter().all(|&(t, s)| {
+                let chord = sa + (sz - sa) * ((t - ta) / width);
+                (s - chord).abs() <= tol
+            })
+        })
+    };
+    let mut kept: Vec<(f64, f64)> = table.first().copied().into_iter().collect();
+    let mut anchor = 0usize;
+    // the run from `anchor` reaches `end` while its points lie on the chord to `end`
+    for end in 2..table.len() {
+        if !on_chord(anchor, end) {
+            anchor = end - 1;
+            kept.extend(table.get(anchor).copied());
+        }
+    }
+    if table.len() > 1 {
+        kept.extend(table.last().copied());
+    }
+    kept
+}
+
 /// One edge use of a loop, in the direction of its edge: its UV trim, its edge's curve
 /// on the edge's interval (`None` for an edge without a curve: the vertex), and the
 /// points at the loop's start and end of it.
@@ -2027,7 +2112,7 @@ fn gap_closure(
     let area_scale = estimated_area / 10.0;
     let mut scale = [area_scale * length; 13];
     for (i, s) in scale.iter_mut().enumerate().skip(1) {
-        *s = area_scale * length.powi(if i <= 3 { 2 } else { 3 });
+        *s = area_scale * det::powi(length, if i <= 3 { 2 } else { 3 });
     }
     let accuracy = if accuracy < EFF_ZERO {
         EFF_ZERO_SQ
@@ -2054,6 +2139,7 @@ fn gap_closure(
                         continue;
                     }
                     kronrod_integrate(k, *lo, *hi, accuracy, &scale, &mut strip, |t, dy| {
+                        k.work_counters.add_mass_closure_evaluation();
                         let d = side.trim.evaluate(k, t, 1, true, false)?;
                         let (Some(&uv), Some(&duv)) = (d.first(), d.get(1)) else {
                             return Err(missing());
@@ -2105,6 +2191,12 @@ fn gap_closure(
                 table.push((tau, last));
             }
             table.push((c1, e1));
+            // a polynomial strip is one piece where its correspondence does not bend
+            let table = if polynomial_strip(k, &surface, &side.trim, curve, (e0, e1)) {
+                correspondence_bends(&table, e1 - e0)
+            } else {
+                table
+            };
             let ea = curve.evaluate_point(k, e0)?;
             let eb = curve.evaluate_point(k, e1)?;
             side.trim_ends = if side.same { [p0, p1] } else { [p1, p0] };
@@ -2132,6 +2224,7 @@ fn gap_closure(
                 };
                 let slope = if tb > ta { (sb - sa) / (tb - ta) } else { 0.0 };
                 kronrod_integrate(k, *lo, *hi, accuracy, &scale, &mut strip, |tau, dy| {
+                    k.work_counters.add_mass_closure_evaluation();
                     let d = side.trim.evaluate(k, tau, 1, true, false)?;
                     let (Some(&uv), Some(&duv)) = (d.first(), d.get(1)) else {
                         return Err(missing());
@@ -2425,7 +2518,7 @@ fn properties_in_box(
         if mass.x < EFF_ZERO {
             mass.x = 1.0;
         }
-        let volume = 4.0 * PI * mass.y.powf(3.0) / 3.0;
+        let volume = 4.0 * PI * det::powf(mass.y, 3.0) / 3.0;
         let area = 4.0 * PI * mass.y * mass.y;
         total.volume += volume;
         total.area += area;
@@ -3314,7 +3407,7 @@ mod tests {
                     if x == 0.0 {
                         w * if n == 0 { 1.0 } else { 0.0 }
                     } else {
-                        w * (x.powi(n) + (-x).powi(n))
+                        w * (det::powi(x, n) + det::powi(-x, n))
                     }
                 })
                 .sum()
@@ -3354,6 +3447,50 @@ mod tests {
             assert!((rule(nodes, gauss, dg + 1) - exact(dg + 1)).abs() > 1e-15);
         }
     }
+    /// A strip's correspondence keeps its ends and the points where it bends: a line keeps
+    /// only its ends, one kink only it, a curve every point, and a table of no width in the
+    /// trim's parameter every point.
+    #[test]
+    fn a_correspondence_keeps_only_its_bends() {
+        let grid = |f: &dyn Fn(f64) -> f64| -> Vec<(f64, f64)> {
+            (0..=64)
+                .map(|i| {
+                    let tau = 2.0 + 3.0 * f64::from(i) / 64.0;
+                    (tau, f(tau))
+                })
+                .collect()
+        };
+        let line = grid(&|tau| 7.0 - 4.0 * tau);
+        let ends = [line[0], line[64]];
+        assert_eq!(correspondence_bends(&line, 12.0), ends);
+        // a kink at the grid's 40th point (tau = 3.875)
+        let kink = grid(&|tau| if tau <= 3.875 { tau } else { 3.0 * tau - 7.75 });
+        assert_eq!(
+            correspondence_bends(&kink, 7.0),
+            [kink[0], kink[40], kink[64]]
+        );
+        // the inverse of x(t) = 0.6 t + 0.4 t^2 on the grid of tau in [0, 1]: bent everywhere
+        let curve: Vec<(f64, f64)> = (0..=64)
+            .map(|i| {
+                let x = f64::from(i) / 64.0;
+                (x, (-0.6 + (0.36 + 1.6 * x).sqrt()) / 0.8)
+            })
+            .collect();
+        assert_eq!(correspondence_bends(&curve, 1.0), curve);
+        // a bend under EFF_ZERO of the span is no bend; one well over it is, and the points
+        // either side of it are off their chords through it
+        let mut nudged = line.clone();
+        nudged[20].1 += 0.5 * EFF_ZERO * 12.0;
+        assert_eq!(correspondence_bends(&nudged, 12.0), ends);
+        nudged[20].1 += 10.0 * EFF_ZERO * 12.0;
+        assert_eq!(
+            correspondence_bends(&nudged, 12.0),
+            [line[0], line[19], nudged[20], line[21], line[64]]
+        );
+        let flat = vec![(1.0, 0.0), (1.0, 0.5), (1.0, 1.0)];
+        assert_eq!(correspondence_bends(&flat, 1.0), flat);
+    }
+
     use crate::geom::attribute::{Attribute, Behavior};
 
     #[test]

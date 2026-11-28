@@ -127,10 +127,11 @@
 //!   wrapped as a `Surface` (without owner).
 
 use crate::error::nurbs::BSplineFailure;
+use crate::surface::surface_point_solve::cell_index::CellIndex;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use crate::error::{Result, SolidError};
+use crate::error::{Result, SolidError, SM_ERR_NULL_POINTER};
 use crate::geom::axis2_placement::Axis2Placement;
 use crate::geom::extent1d::Extent1d;
 use crate::geom::extent2d::Extent2d;
@@ -458,12 +459,40 @@ pub struct BSplineSurface {
 /// too. Every `&mut` access detaches a shared cell first (copy on write), so an edit of
 /// one never reaches the other.
 #[derive(Debug, Default)]
-pub(crate) struct NurbSlot(Arc<OnceLock<Surface>>);
+pub(crate) struct NurbSlot(Arc<NurbData>);
+
+/// What a [`NurbSlot`] holds: the NURB and the cell index built from it (the index is
+/// not part of the NURB and an edit drops it).
+#[derive(Default)]
+pub(crate) struct NurbData {
+    value: OnceLock<Surface>,
+    cells: OnceLock<Option<Box<CellIndex>>>,
+}
+
+// Surface diagnostics describe the NURB itself, regardless of whether a query has built the index.
+impl std::fmt::Debug for NurbData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.value, f)
+    }
+}
+
+// A detached editing copy starts with an empty index.
+impl Clone for NurbData {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            cells: OnceLock::new(),
+        }
+    }
+}
+
+/// A [`NurbSlot`]'s cell, as a cache keeps it ([`NurbSlot::cell`]).
+pub(crate) type NurbCell = Arc<NurbData>;
 
 impl NurbSlot {
     /// No NURB (`NULL`).
     pub(crate) fn none() -> Self {
-        Self(Arc::new(OnceLock::new()))
+        Self::default()
     }
 
     /// The same cell (for an evaluation copy that stands for the same surface object).
@@ -471,29 +500,60 @@ impl NurbSlot {
         Self(Arc::clone(&self.0))
     }
 
+    /// Whether `cell` is this slot's own cell ([`NurbSlot::cell`]).
+    pub(crate) fn is_cell(&self, cell: &NurbCell) -> bool {
+        Arc::ptr_eq(&self.0, cell)
+    }
+
+    /// The cell itself, for a cache that keeps what was read from the NURB it holds: while
+    /// the cache holds it, every edit through a slot sharing it detaches first
+    /// ([`Arc::make_mut`]), so the NURB in the cell is never changed, only filled once.
+    pub(crate) fn cell(&self) -> NurbCell {
+        Arc::clone(&self.0)
+    }
+
     /// The NURB, if any.
     pub(crate) fn as_ref(&self) -> Option<&Surface> {
-        self.0.get()
+        self.0.value.get()
     }
 
     /// The NURB, mutable, if any (detaches a shared cell first).
     pub(crate) fn as_mut(&mut self) -> Option<&mut Surface> {
-        Arc::make_mut(&mut self.0).get_mut()
+        self.for_edit().value.get_mut()
+    }
+
+    fn for_edit(&mut self) -> &mut NurbData {
+        let data = Arc::make_mut(&mut self.0);
+        data.cells.take();
+        data
+    }
+
+    /// Bounds and spacing from this NURB only. Concurrent first readers may build
+    /// independently; both observe the same immutable net and share the stored result.
+    pub(crate) fn cell_index(
+        &self,
+        build: impl FnOnce() -> Result<Option<CellIndex>>,
+    ) -> Result<Option<&CellIndex>> {
+        if let Some(index) = self.0.cells.get() {
+            return Ok(index.as_deref());
+        }
+        let index = build()?.map(Box::new);
+        Ok(self.0.cells.get_or_init(|| index).as_deref())
     }
 
     /// Whether there is no NURB.
     pub(crate) fn is_none(&self) -> bool {
-        self.0.get().is_none()
+        self.0.value.get().is_none()
     }
 
     /// Whether there is a NURB.
     pub(crate) fn is_some(&self) -> bool {
-        self.0.get().is_some()
+        self.0.value.get().is_some()
     }
 
     /// Takes the NURB out, leaving none (detaches a shared cell first).
     pub(crate) fn take(&mut self) -> Option<Surface> {
-        Arc::make_mut(&mut self.0).take()
+        self.for_edit().value.take()
     }
 
     /// Detaches a shared cell, so that what is made through this surface from now on
@@ -505,13 +565,16 @@ impl NurbSlot {
     /// Stores `made` when there is no NURB yet (the first fill wins, as upstream's
     /// `GetOrCreateGwNurbPointer` makes once) and returns the stored NURB.
     pub(crate) fn fill(&self, made: Surface) -> &Surface {
-        self.0.get_or_init(|| made)
+        self.0.value.get_or_init(|| made)
     }
 }
 
 impl From<Option<Surface>> for NurbSlot {
     fn from(nurb: Option<Surface>) -> Self {
-        Self(Arc::new(nurb.map_or_else(OnceLock::new, OnceLock::from)))
+        Self(Arc::new(NurbData {
+            value: nurb.map_or_else(OnceLock::new, OnceLock::from),
+            cells: OnceLock::new(),
+        }))
     }
 }
 
@@ -1211,7 +1274,11 @@ impl BSplineSurface {
     /// `SM_ERR_NULL_POINTER` without NURB.
     pub fn canonical(&self) -> Result<SurfaceCanonical> {
         let sur = self.nurb_ref().ok_or_else(|| {
-            SolidError::b_spline(OP_GET_CANON, BSplineFailure::Missing("the NURBS form"))
+            SolidError::b_spline_with_status(
+                OP_GET_CANON,
+                BSplineFailure::NoNurbsForm,
+                SM_ERR_NULL_POINTER,
+            )
         })?;
         let (knu, knv) = sur.knot_vectors()?;
         let (u_knots, u_multiplicities) = get_knots(&knu, None);
@@ -2193,7 +2260,7 @@ impl BSplineSurface {
         let Some(&uv) = solutions.first() else {
             return Err(SolidError::b_spline(
                 OP_STEP_INV,
-                BSplineFailure::Failed("the point is not close enough to the surface"),
+                BSplineFailure::NoFootWithinTolerance { tolerance: tol_3d },
             ));
         };
 
@@ -2545,6 +2612,33 @@ fn polar_guess_basis(g: &PolarBox) -> Vec3 {
     }
 }
 
+/// Not upstream: the content digest ([`crate::geom::content`]). The NURB is written when
+/// present. Whether it is borrowed decides no evaluation, and the two out-of-bounds flags
+/// are a solve's scope on a shared surface, not the surface: they are left out.
+impl crate::geom::content::Content for BSplineSurface {
+    fn content(&self, d: &mut crate::geom::content::Digest) -> Option<()> {
+        let Self {
+            nurb,
+            nurb_is_borrowed: _,
+            out_of_bounds_enabled: _,
+            continues_past_domain: _,
+            knot_type,
+            form,
+        } = self;
+        d.tag(0xB55);
+        match nurb.as_ref() {
+            Some(n) => {
+                d.bool(true);
+                n.content(d)?;
+            }
+            None => d.bool(false),
+        }
+        d.hashed(knot_type);
+        d.hashed(form);
+        Some(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2563,6 +2657,28 @@ mod tests {
             Point3::new(10.0, 10.0, 0.0),
         )
         .unwrap()
+    }
+
+    /// A point 10 off the plane has no foot within the tolerance: the inversion names
+    /// the tolerance it searched within, class not within tolerance, status `SM_ERR`.
+    #[test]
+    fn step_inversion_of_a_point_off_the_surface_names_its_tolerance() {
+        let k = Kernel::default();
+        let s = bilinear();
+        let dom = s.natural_uv_domain();
+        let e = s
+            .step_inversion(&k, &dom, Point3::new(5.0, 5.0, 10.0), 1e-6, None)
+            .unwrap_err();
+        assert_eq!(
+            e.nurbs_failure(),
+            Some(&NurbsFailure::BSpline(
+                BSplineFailure::NoFootWithinTolerance { tolerance: 1e-6 }
+            )),
+            "{e:?}"
+        );
+        assert_eq!(e.kind(), crate::error::ErrorKind::NotWithinTolerance);
+        assert_eq!(e.upstream_status(), Some(crate::error::SM_ERR));
+        assert!(!e.is_defect() && !e.is_refusal(), "{e:?}");
     }
 
     #[test]
@@ -2597,7 +2713,7 @@ mod tests {
             s.canonical(),
             Err(e) if e.sm_status() == Some(1006)
                 && e.nurbs_failure()
-                    == Some(&NurbsFailure::BSpline(BSplineFailure::Missing("the NURBS form")))
+                    == Some(&NurbsFailure::BSpline(BSplineFailure::NoNurbsForm))
         ));
         assert!(s.copy().gw_nurb().is_none());
         assert!(s.approx_eq(&BSplineSurface::new()));

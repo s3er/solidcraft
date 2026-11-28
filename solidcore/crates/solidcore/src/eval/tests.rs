@@ -6,6 +6,7 @@
 use super::spline::orders;
 use super::vec::VecExt;
 use super::*;
+use crate::math::det;
 use crate::math::Vec3;
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -83,7 +84,7 @@ fn exact(s: &Surface, p: Vec3) -> (f64, Vec3, [f64; 2]) {
             half_angle,
         } => {
             let (o, z) = ax(frame);
-            let slope = half_angle.tan();
+            let slope = det::tan(*half_angle);
             let q = p - o;
             let h = q.dot(z);
             let rad = q - z * h;
@@ -659,9 +660,9 @@ fn a_rational_quarter_circle_has_the_circles_derivatives() {
     let s = quarter_cylinder();
     for u in [0.0, 0.2, 0.5, 0.9, 1.0] {
         let d = s.partials(u, 0.4).unwrap();
-        assert!((d[0][0].x.hypot(d[0][0].y) - 2.0).abs() < 1e-12);
+        assert!((det::hypot(d[0][0].x, d[0][0].y) - 2.0).abs() < 1e-12);
         let (r1, r2) = (d[1][0], d[2][0]);
-        let k = r1.cross(r2).len() / r1.len().powi(3);
+        let k = r1.cross(r2).len() / det::powi(r1.len(), 3);
         assert!((k - 0.5).abs() < 1e-12, "{k}");
         assert!(d[0][2].len() < 1e-12 && d[1][1].z.abs() < 1e-12);
     }
@@ -762,11 +763,18 @@ fn revolved_line_is_a_cylinder() {
     for &(u, v) in &[(0.0, 0.0), (0.5, 1.0), (1.0, 4.0), (0.25, 6.0)] {
         let (p, n) = s.eval(u, v).unwrap();
         assert!(
-            close(p, Vec3::new(2.0 * v.cos(), 2.0 * v.sin(), 5.0 * u), 1e-12),
+            close(
+                p,
+                Vec3::new(2.0 * det::cos(v), 2.0 * det::sin(v), 5.0 * u),
+                1e-12
+            ),
             "{p:?}"
         );
         // S_u = +Z, S_v = tangential: the normal points inward (−radial) for this profile.
-        assert!(close(n, Vec3::new(-v.cos(), -v.sin(), 0.0), 1e-12), "{n:?}");
+        assert!(
+            close(n, Vec3::new(-det::cos(v), -det::sin(v), 0.0), 1e-12),
+            "{n:?}"
+        );
     }
 }
 
@@ -1108,7 +1116,7 @@ fn curve_jets_are_exact_on_every_kind() {
     };
     let leader = Curve::Polyline {
         points: (0..=12)
-            .map(|k| (k as f64 * TAU / 12.0).sin_cos())
+            .map(|k| det::sin_cos(k as f64 * TAU / 12.0))
             .map(|(s, c)| [4.1 * c, 4.1 * s, 3.2])
             .collect(),
     };
@@ -1305,7 +1313,7 @@ fn a_form_on_arcs_of_its_own_is_the_surface_and_does_not_close_around_an_open_fa
                 v0 + (v1 - v0) * j as f64 / 12.,
             ];
             let p = own_at.point(uv).unwrap() - Vec3::new(1., 2., 3.);
-            let off = ((p.x.hypot(p.y) - 5.).powi(2) + p.z.powi(2)).sqrt() - 1.5;
+            let off = (det::powi(det::hypot(p.x, p.y) - 5., 2) + det::powi(p.z, 2)).sqrt() - 1.5;
             assert!(off.abs() < 1e-12, "{uv:?}: {off}");
         }
     }
@@ -1346,12 +1354,12 @@ fn a_hole_beside_the_seam_lies_in_its_face_turn() {
         radius: r,
     };
     let s = -10f64.to_radians();
-    let at = |a: f64, z: f64| [r * a.cos(), r * a.sin(), z];
+    let at = |a: f64, z: f64| [r * det::cos(a), r * det::sin(a), z];
     let ring = |z: f64| Curve::Circle {
         frame: Frame {
             origin: [0., 0., z],
-            x_axis: [s.cos(), s.sin(), 0.],
-            y_axis: [-s.sin(), s.cos(), 0.],
+            x_axis: [det::cos(s), det::sin(s), 0.],
+            y_axis: [-det::sin(s), det::cos(s), 0.],
         },
         radius: r,
     };
@@ -1461,7 +1469,7 @@ fn sphere_seam_and_cut(a: f64, d: f64) -> (Surface, Curve, Curve) {
         },
         radius: r,
     };
-    let (s, c) = a.sin_cos();
+    let (s, c) = det::sin_cos(a);
     let cut = Curve::Circle {
         frame: Frame {
             origin: [d * c, d * s, 0.],
@@ -1516,8 +1524,8 @@ fn a_sphere_less_a_hole_beside_its_seam_spans_the_whole_turn() {
 #[test]
 fn a_loop_over_both_poles_turns_the_way_its_face_lies() {
     let (sphere, seam, bore) = sphere_seam_and_cut(0.0, 4.0);
-    let below = [-FRAC_PI_2, -(0.6f64.asin())];
-    let above = [0.6f64.asin(), FRAC_PI_2];
+    let below = [-FRAC_PI_2, -(det::asin(0.6f64))];
+    let above = [det::asin(0.6f64), FRAC_PI_2];
     let outer = [
         (&seam, below, true),
         (&bore, [std::f64::consts::PI, TAU], true),
@@ -1661,8 +1669,8 @@ fn a_loop_that_goes_round_once_and_backs_up_a_little_does_not_wind() {
     let ruling = |turns: f64| {
         let a = turns * TAU;
         Curve::Line {
-            start: [r * a.cos(), r * a.sin(), 0.],
-            end: [r * a.cos(), r * a.sin(), h],
+            start: [r * det::cos(a), r * det::sin(a), 0.],
+            end: [r * det::cos(a), r * det::sin(a), h],
         }
     };
     let (bottom, top) = (ring(0.), ring(h));
@@ -1835,7 +1843,7 @@ fn analytic_apexes_and_rings_of_radius_zero_are_poles() {
         half_angle: -0.4,
     })
     .unwrap();
-    let apex = 2.0 / 0.4f64.tan();
+    let apex = 2.0 / det::tan(0.4f64);
     assert_eq!(cone.collapse([0.7, apex], 0.0).unwrap(), Collapse::U);
     assert_eq!(
         cone.collapse([0.7, 0.5 * apex], 1e-6).unwrap(),
@@ -1994,7 +2002,7 @@ fn a_lune_between_two_poles_keeps_its_width_round_the_axis() {
     let meridian = |a: f64| Curve::Circle {
         frame: Frame {
             origin: [0.; 3],
-            x_axis: [a.cos(), a.sin(), 0.],
+            x_axis: [det::cos(a), det::sin(a), 0.],
             y_axis: [0., 0., 1.],
         },
         radius: r,
@@ -2054,6 +2062,225 @@ fn a_lune_between_two_poles_keeps_its_width_round_the_axis() {
             assert!(
                 (v[0] + FRAC_PI_2).abs() < 1e-9 && (v[1] - FRAC_PI_2).abs() < 1e-9,
                 "centre {centre}, width {width}, {name}: {v:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn attachment_residuals_keep_derivatives_of_the_point_and_the_moving_curve() {
+    use super::constraint::{self as k, Dual, Num, V};
+    // Radius five in XY. A point at (8,0,3) is three above the plane and
+    // three beyond the circle. Translating the circle alone reverses the point gradient.
+    let p = V {
+        x: Dual::var(8.0, 0),
+        y: Dual::var(0.0, 1),
+        z: Dual::var(3.0, 2),
+    };
+    let circle = |x, y| V {
+        x: Dual::num(x) + Dual::var(0.0, 3),
+        y: Dual::num(y),
+        z: Dual::var(0.0, 4),
+    };
+    let [height, radial] =
+        k::point_on_circle(p, circle(5.0, 0.0), circle(0.0, 5.0), circle(-5.0, 0.0));
+    assert!((height.v - 3.0).abs() < 1e-12);
+    assert!((radial.v - 3.0).abs() < 1e-12);
+    for (actual, expected) in height.d.into_iter().take(5).zip([0.0, 0.0, 1.0, 0.0, -1.0]) {
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+    }
+    for (actual, expected) in radial.d.into_iter().take(5).zip([1.0, 0.0, 0.0, -1.0, 0.0]) {
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+    }
+    let line = k::point_on_line(p, V::of([0.0, 0.0, 0.0]), V::of([10.0, 0.0, 0.0]));
+    assert_eq!(line.map(|v| v.v), [0.0, 3.0, 0.0]);
+    assert_eq!(line[1].d[2], 1.0);
+    assert_eq!(line[2].d[1], -1.0);
+}
+
+#[test]
+fn plane_measurements_and_circle_operands_have_closed_form_values() {
+    use super::constraint::{self as k, Dual, Num, V};
+    let origin = V::of([0.0, 0.0, 5.0]);
+    let normal = V::of([0.0, 0.0, 1.0]);
+    let point = V {
+        x: Dual::num(4.0),
+        y: Dual::num(0.0),
+        z: Dual::var(2.0, 0),
+    };
+    let d = k::plane_distance(point, origin, normal);
+    assert_eq!((d.v, d.d[0]), (-3.0, 1.0));
+    let end = V {
+        x: Dual::num(4.0),
+        y: Dual::num(0.0),
+        z: Dual::var(3.0, 0),
+    };
+    let (angle, length) = k::plane_angle(V::of([0.0; 3]), end, normal);
+    assert!((angle.v - det::atan2(3.0_f64, 4.0)).abs() < 1e-12);
+    assert!((angle.d[0] - 4.0 / 25.0).abs() < 1e-12);
+    assert_eq!(length.v, 5.0);
+    let frame = a_frame();
+    assert_eq!(k::plane_point(&frame, [2.0, 4.0]), [3.0, 6.0, 3.0]);
+    assert_eq!(k::plane_normal(&frame), [0.0, 0.0, 1.0]);
+    for [x, y, z] in k::arc_circle_points([0.0, 0.0], [5.0, 0.0], &frame) {
+        assert!((det::powi(x - 1.0, 2) + det::powi(y - 2.0, 2) - 25.0).abs() < 1e-12);
+        assert_eq!(z, 3.0);
+    }
+    let mut other = frame.clone();
+    other.origin = [100.0, 200.0, 3.0];
+    other.y_axis = [0.0, -1.0, 0.0];
+    assert!(k::same_plane(&frame, &other));
+    other.origin[2] = 4.0;
+    assert!(!k::same_plane(&frame, &other));
+}
+
+/// A corner is rounded by the arc tangent to both segments: a square corner by a quarter circle,
+/// a skew one in the plane of its segments, with the closed-form setback r / tan(θ/2).
+#[test]
+fn a_corner_round_is_tangent_to_both_segments_and_refuses_what_has_no_corner() {
+    use super::constraint::{self as k, NoCorner, V};
+    let p = |x: f64, y: f64, z: f64| V::<f64>::of([x, y, z]);
+    let ([on_a, middle, on_b], setback) = k::corner_round(
+        p(100.0, 0.0, 0.0),
+        p(0.0, 0.0, 0.0),
+        p(100.0, 0.0, 80.0),
+        20.0,
+    )
+    .unwrap();
+    assert!((setback - 20.0).abs() < 1e-12);
+    let near = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12);
+    assert!(near(on_a, [80.0, 0.0, 0.0]) && near(on_b, [100.0, 0.0, 20.0]));
+    // The centre is (80, 0, 20); the middle is 20 from it towards the corner.
+    let h = 20.0 * std::f64::consts::FRAC_PI_4.cos();
+    assert!(near(middle, [80.0 + h, 0.0, 20.0 - h]), "{middle:?}");
+
+    // A skew corner: cos θ = -30 / √3400 between (-1, 0, 0) and (30, 40, 30) / √3400.
+    let (corner, far_a, far_b, r) = (
+        p(60.0, 0.0, 0.0),
+        p(0.0, 0.0, 0.0),
+        p(90.0, 40.0, 30.0),
+        10.0,
+    );
+    let ([on_a, middle, on_b], setback) = k::corner_round(corner, far_a, far_b, r).unwrap();
+    let theta = (-30.0 / 3400.0_f64.sqrt()).acos();
+    assert!((setback - r / (0.5 * theta).tan()).abs() < 1e-12);
+    let centre = k::circumcenter(V::of(on_a), V::of(middle), V::of(on_b));
+    assert!((k::circumradius(V::<f64>::of(on_a), V::of(middle), V::of(on_b)) - r).abs() < 1e-9);
+    assert!(((centre - corner).len() - r / (0.5 * theta).sin()).abs() < 1e-9);
+    // Tangent: each radius to an end is square to its segment, and all lies in their plane.
+    let normal = (far_a - corner).cross(far_b - corner);
+    for (end, far) in [(on_a, far_a), (on_b, far_b)] {
+        assert!((V::of(end) - centre).dot(far - corner).abs() < 1e-9);
+        assert!(((V::of(end) - corner).len() - setback).abs() < 1e-12);
+    }
+    for point in [V::of(on_a), V::of(middle), V::of(on_b), centre] {
+        assert!((point - corner).dot(normal).abs() < 1e-9);
+    }
+
+    let no = |far_a, far_b, r| k::corner_round(p(10.0, 0.0, 5.0), far_a, far_b, r).unwrap_err();
+    assert_eq!(
+        no(p(0.0, 0.0, 0.0), p(20.0, 0.0, 10.0), 2.0),
+        NoCorner::Straight
+    );
+    assert_eq!(
+        no(p(0.0, 0.0, 0.0), p(4.0, 0.0, 2.0), 2.0),
+        NoCorner::Overlapping
+    );
+    assert_eq!(
+        no(p(10.0, 0.0, 5.0), p(4.0, 0.0, 2.0), 2.0),
+        NoCorner::NoLength
+    );
+    for r in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            no(p(0.0, 0.0, 5.0), p(10.0, 9.0, 5.0), r),
+            NoCorner::OutOfRange
+        );
+    }
+    // A turn of a hundred-millionth of a radian is one straight line.
+    let turn = 1e-8_f64;
+    let barely = p(10.0 + 100.0 * turn.cos(), 100.0 * turn.sin(), 5.0);
+    assert_eq!(no(p(-90.0, 0.0, 5.0), barely, 2.0), NoCorner::Straight);
+}
+
+/// A lune half a turn wide (a half sphere whose rim is a meridian circle) is as wide as the
+/// other half, so its width says nothing of which half it is: the face is the half on the loop's
+/// left in (u, v), whichever way the loop runs, wherever it starts and wherever the seam lies,
+/// across it included.
+#[test]
+fn a_half_sphere_lune_is_the_half_on_its_loops_left() {
+    let r = 1.0f64;
+    let sphere = Surface::Sphere {
+        frame: Frame {
+            origin: [0.; 3],
+            x_axis: [1., 0., 0.],
+            y_axis: [0., 1., 0.],
+        },
+        radius: r,
+    };
+    let meridian = |a: f64| Curve::Circle {
+        frame: Frame {
+            origin: [0.; 3],
+            x_axis: [det::cos(a), det::sin(a), 0.],
+            y_axis: [0., 0., 1.],
+        },
+        radius: r,
+    };
+    let half = FRAC_PI_2;
+    for centre in [0.0, 0.3, std::f64::consts::PI, -1.0, 6.2] {
+        let (a, b) = (meridian(centre - half), meridian(centre + half));
+        // Up a meridian the face is on the side of lower angle, down one on the side of higher.
+        let loops = [
+            (
+                "up b, down a",
+                centre,
+                vec![
+                    (&b, [-FRAC_PI_2, FRAC_PI_2], true),
+                    (&a, [-FRAC_PI_2, FRAC_PI_2], false),
+                ],
+            ),
+            (
+                "up a, down b",
+                centre + std::f64::consts::PI,
+                vec![
+                    (&a, [-FRAC_PI_2, FRAC_PI_2], true),
+                    (&b, [-FRAC_PI_2, FRAC_PI_2], false),
+                ],
+            ),
+            (
+                "from b's middle",
+                centre,
+                vec![
+                    (&b, [0., FRAC_PI_2], true),
+                    (&a, [-FRAC_PI_2, FRAC_PI_2], false),
+                    (&b, [-FRAC_PI_2, 0.], true),
+                ],
+            ),
+            (
+                "from a's middle",
+                centre + std::f64::consts::PI,
+                vec![
+                    (&a, [0., FRAC_PI_2], true),
+                    (&b, [-FRAC_PI_2, FRAC_PI_2], false),
+                    (&a, [-FRAC_PI_2, 0.], true),
+                ],
+            ),
+        ];
+        for (name, middle, lune) in loops {
+            let [u, v] = form::extent(&sphere, &[lune], 1e-9)
+                .unwrap()
+                .expect("an extent");
+            assert!(
+                (u[1] - u[0] - std::f64::consts::PI).abs() < 1e-9,
+                "centre {centre}, {name}: {u:?}"
+            );
+            let off = (0.5 * (u[0] + u[1]) - middle).rem_euclid(TAU);
+            assert!(
+                off.min(TAU - off) < 1e-9,
+                "centre {centre}, {name}: {u:?}, middle {middle} expected"
+            );
+            assert!(
+                (v[0] + FRAC_PI_2).abs() < 1e-9 && (v[1] - FRAC_PI_2).abs() < 1e-9,
+                "centre {centre}, {name}: {v:?}"
             );
         }
     }

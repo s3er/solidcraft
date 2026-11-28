@@ -26,6 +26,7 @@
 // A comparison that is not true takes the refusing branch, so a NaN is refused too.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+use crate::math::det;
 use std::cell::OnceCell;
 
 use super::vec::{v3, VecExt};
@@ -201,7 +202,7 @@ impl Query {
             return Some(vec![(t0, p0), (t1, p1)]);
         }
         let sag = sag.max(1e-12);
-        let turn = (std::f64::consts::TAU / 20.0).cos();
+        let turn = det::cos(std::f64::consts::TAU / 20.0);
         let mut out = vec![(t0, p0)];
         // Pieces still to look at; the last pushed is looked at first, so pushing the right half
         // before the left keeps the output in order.
@@ -329,6 +330,41 @@ impl Query {
             .collect();
         out.sort_by(|x, y| x.0.total_cmp(&y.0));
         out
+    }
+
+    /// The faces that face against the curves `samples` lie on, ascending. A sample is a point on
+    /// a curve and the curve's direction there; a face through it is meant to face along that
+    /// direction crossed with `normal`, as an extruded sheet's walls face (out of a region whose
+    /// outer loop runs counter-clockwise about `normal`). Each face `p` lies on ([`Query::faces_at`]
+    /// within `accept` mm) is judged there by its normal out of the material, the judgements of a
+    /// face are summed, and a face whose sum is below zero faces against them. A face no sample
+    /// lies on, a sample whose direction is along `normal` and a face with no normal there say
+    /// nothing.
+    #[must_use]
+    pub fn faces_against(&self, normal: Vec3, samples: &[(Vec3, Vec3)], accept: f64) -> Vec<usize> {
+        let mut votes = vec![0.0f64; self.record.faces.len()];
+        for (p, d) in samples {
+            let Some(want) = d.cross(normal).normalized() else {
+                continue;
+            };
+            for (_, f) in self.faces_at(*p, accept) {
+                let Some(n) = self
+                    .face_uv(f, *p, accept)
+                    .and_then(|uv| self.face_normal(f, uv))
+                else {
+                    continue;
+                };
+                if let Some(v) = votes.get_mut(f) {
+                    *v += n.dot(want);
+                }
+            }
+        }
+        votes
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| **v < 0.0)
+            .map(|(f, _)| f)
+            .collect()
     }
 
     /// Where the ray from `o` along `d` meets the faces ahead of `o` (further than `accept`):
@@ -856,7 +892,7 @@ fn ray_surface(surface: &Surface, o: Vec3, d: Vec3) -> Option<Vec<f64>> {
         } => {
             // r(v) = r0 + v tan(half), v along z; the radial distance squared is r(v)².
             let (c, z) = (v3(frame.origin), v3(frame.x_axis).cross(v3(frame.y_axis)));
-            let k = half_angle.tan();
+            let k = det::tan(*half_angle);
             let (w, dd) = ((o - c) - z * (o - c).dot(z), d - z * d.dot(z));
             let (h, dh) = ((o - c).dot(z), d.dot(z));
             let (r, dr) = (radius_at_origin + h * k, dh * k);

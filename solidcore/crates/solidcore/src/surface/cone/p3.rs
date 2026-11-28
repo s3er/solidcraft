@@ -61,6 +61,7 @@ use super::{Cone, ConeStepInversion};
 use crate::curve::curve::{Curve, CurveKind};
 use crate::curve::ellipse::{Ellipse, EllipseOptions};
 use crate::curve::line::{BoundedLineOptions, CurveLocationType, Line};
+use crate::error::surface::SurfaceFailure;
 use crate::error::{ignored, Result, SolidError};
 use crate::geom::axis2_placement::Axis2Placement;
 use crate::geom::extent1d::Extent1d;
@@ -77,6 +78,7 @@ use crate::geom::tol::{
 use crate::geom::vector2d::Point2;
 use crate::geom::vector3d::{sqrt, Point3, Vec3};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{max2, min2, EFF_ZERO, EFF_ZERO_SQRT, PI, UNDEF_DOUBLE};
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::nurbs::b_spline_surface::{BoundingBoxRequest, LocationType};
@@ -158,9 +160,12 @@ fn append_boundary_intersections(
             || result.curve_types.len() != count
             || result.deviations.len() != count
         {
-            return Err(SolidError::surface_failed(
+            return Err(SolidError::surface(
                 OP,
-                "the intersection result's lists differ in length",
+                SurfaceFailure::Defect {
+                    why: "an intersection result's lists differ in length, though the \
+                          intersections push one entry to each list per curve",
+                },
             ));
         }
     }
@@ -241,7 +246,13 @@ fn bbox(k: &Kernel, cone: &Cone, domain: &Extent2d) -> Result<Extent3d> {
         )?
         .normal
         .ok_or_else(|| {
-            SolidError::surface_failed(OP, "the surface's bounding box could not be computed")
+            SolidError::surface(
+                OP,
+                SurfaceFailure::Defect {
+                    why: "the B-spline bounding box routine, asked for the normal box, \
+                          returned without it, though it returns every box it is asked for",
+                },
+            )
         })
 }
 
@@ -310,7 +321,7 @@ fn sweep_end_on_the_lens(
                 continue;
             }
             let y_axis = axis.cross(x_axis);
-            return Ok(Some(end.cos() * x_axis + end.sin() * y_axis));
+            return Ok(Some(det::cos(end) * x_axis + det::sin(end) * y_axis));
         }
     }
     Ok(None)
@@ -1125,9 +1136,12 @@ fn nurbs_uv_status_ignored(cone: &Cone, k: &Kernel, step_uv: Point2) -> Result<P
 
 fn ellipse_contains(k: &Kernel, curve: &Curve, point: Point3) -> Result<bool> {
     let CurveKind::Ellipse(ellipse) = curve.kind() else {
-        return Err(SolidError::surface_failed(
+        return Err(SolidError::surface(
             OP,
-            "the curve is not an ellipse",
+            SurfaceFailure::Defect {
+                why: "a curve compared is not an ellipse, though both callers compare only \
+                      the ellipse arcs the cone/cone branch built",
+            },
         ));
     };
     Ok(ellipse.step_inversion(k, point, true, 0.0).1 != Some(CurveLocationType::Exterior))
@@ -1158,8 +1172,8 @@ fn add_ellipse_intervals_trimmed_to_two_cones(
             for intersection in interval.intersect_periodic(other_interval, 360.0, false)? {
                 if intersection.length() < zero_ang {
                     let angle = intersection.min();
-                    let cos = (angle * PI / 180.0).cos();
-                    let sin = (angle * PI / 180.0).sin();
+                    let cos = det::cos(angle * PI / 180.0);
+                    let sin = det::sin(angle * PI / 180.0);
                     let point = center + rx * cos * x + y * sin * ry;
                     let mut unique = true;
                     for existing in degenerate.iter() {
@@ -1349,8 +1363,19 @@ impl Cone {
             // the other surface's first surface is this one: its UV curves are swapped,
             // also in a partial output
             IntersectTarget::Revolution(r) => {
-                let more =
-                    r.intersect_with_cone_into(k, other_domain, self, domain, approx_tol_3d, out);
+                let contact = crate::surface::surf_of_revolution::p3::revolved_contact_tol(
+                    k,
+                    [this, other_surface],
+                );
+                let more = r.intersect_with_cone_into(
+                    k,
+                    other_domain,
+                    self,
+                    domain,
+                    approx_tol_3d,
+                    contact,
+                    out,
+                );
                 core::mem::swap(&mut out.surface1_uv_curves, &mut out.surface2_uv_curves);
                 more?
             }
@@ -1454,7 +1479,7 @@ mod tests {
             for p in [start, end] {
                 for c in on {
                     let origin = c.rev().position().origin();
-                    let r = (p.x - origin.x).hypot(p.y - origin.y);
+                    let r = det::hypot(p.x - origin.x, p.y - origin.y);
                     assert!((r - c.bot_radius()).abs() < 1e-9, "{p:?}");
                 }
             }
@@ -1629,7 +1654,7 @@ mod tests {
             let n = curve.natural_interval();
             for t in [n.min(), 0.5 * (n.min() + n.max()), n.max()] {
                 let p = curve.evaluate_point(&k, t).unwrap();
-                assert!((p.x.hypot(p.y) - 5.0).abs() < 1e-7, "{p:?}");
+                assert!((det::hypot(p.x, p.y) - 5.0).abs() < 1e-7, "{p:?}");
             }
         }
     }
@@ -1939,7 +1964,12 @@ mod tests {
             (PlaneOwner::Face(zone), [None, zone]),
             (PlaneOwner::NoFace, [zone, None]),
         ];
-        let at = |deg: f64| (3.0 * deg.to_radians().cos(), 3.0 * deg.to_radians().sin());
+        let at = |deg: f64| {
+            (
+                3.0 * det::cos(deg.to_radians()),
+                3.0 * det::sin(deg.to_radians()),
+            )
+        };
         let near = |got: (TsectCurveType, f64, f64), kind: TsectCurveType, (x, y): (f64, f64)| {
             got.0 == kind && (got.1 - x).abs() < 1e-12 && (got.2 - y).abs() < 1e-12
         };
@@ -1949,7 +1979,7 @@ mod tests {
         for (depth, start) in [(1.6e-10, 8.6e-5), (1e-6, 0.04)] {
             let c = wall_swept(&k, start, 80.0);
             let d = 3.0 - depth;
-            let crossing = (1.0 - depth / 3.0_f64).acos().to_degrees();
+            let crossing = det::acos(1.0 - depth / 3.0_f64).to_degrees();
             assert!(start < crossing, "{depth}: the face starts on the lens");
             for (owner, zone_tols) in faces {
                 let lines = section_lines(&wall_section(&k, &c, d, owner, zone_tols));
@@ -2044,8 +2074,8 @@ mod tests {
                 && (got[0].2 - y).abs() < 1e-12
         };
         let start = (
-            3.0 * 0.04_f64.to_radians().cos(),
-            3.0 * 0.04_f64.to_radians().sin(),
+            3.0 * det::cos(0.04_f64.to_radians()),
+            3.0 * det::sin(0.04_f64.to_radians()),
         );
 
         // the requested part of the wall from 0.045°
@@ -2295,5 +2325,114 @@ mod tests {
         assert_eq!(out.surface2_uv_curves.len(), 1);
         assert_eq!(out.curve_types.len(), 1);
         assert_eq!(out.deviations.len(), 1);
+    }
+
+    /// A cone of semi-angle 89.99° against a coaxial cylinder, both far
+    /// from the origin. The analytic circle's radial error grows with the slope even
+    /// when the axial shift stays inside the tolerance. Either the analytic path
+    /// falls back, or the reported deviation stays within the tolerance.
+    #[test]
+    fn coaxial_steep_coaxial_cone_cylinder_keeps_deviation_within_tol() {
+        let k = Kernel::default();
+        let slope = 89.99_f64.to_radians().tan();
+        let origin = Vec3::new(1e5, 1e5, 1e5);
+        let mut cone = Cone::new_bounded(
+            origin,
+            Vec3::X,
+            Vec3::Y,
+            1.0,
+            1.0 + 0.01 * slope,
+            0.0,
+            360.0,
+            0.01,
+            false,
+            false,
+            false,
+        );
+        cone.make_nurb(&k).unwrap();
+        let mut cylinder = Cone::new_cylinder_bounded(
+            origin,
+            Vec3::X,
+            Vec3::Y,
+            1.0 + 0.005 * slope,
+            0.0,
+            360.0,
+            0.01,
+            false,
+            false,
+            false,
+        );
+        cylinder.make_nurb(&k).unwrap();
+        let domain = cone.rev().base().natural_uv_domain();
+        let other = cylinder.rev().base().natural_uv_domain();
+        let (more, out) = cone
+            .intersect_with_cone(&k, &domain, &cylinder, &other, Some(1e-7))
+            .unwrap();
+        // Cone against cylinder takes the general intersector, never an analytic circle.
+        assert!(
+            more,
+            "a coaxial cone and cylinder fall back to the general intersector"
+        );
+        assert!(
+            more || (!out.deviations.is_empty() && out.deviations[0] <= 1e-7),
+            "more={more} deviations={:?}",
+            out.deviations
+        );
+    }
+
+    /// Two cones meet on a circle of radius 5e-13, above roundoff and
+    /// below `EFF_ZERO`. Fall back, or emit a degenerate touching curve. A crossing,
+    /// or no curve at all, drops the contact.
+    #[test]
+    fn coaxial_apex_circle_below_eff_zero_falls_back_or_touches() {
+        let k = Kernel::default();
+        let mut a = Cone::new_bounded(
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            0.0,
+            10.0,
+            0.0,
+            360.0,
+            10.0,
+            false,
+            false,
+            false,
+        );
+        a.make_nurb(&k).unwrap();
+        let radius = 5e-13;
+        let mut b = Cone::new_bounded(
+            Vec3::new(0.0, 0.0, radius),
+            Vec3::X,
+            Vec3::Y,
+            radius,
+            20.0 + radius,
+            0.0,
+            360.0,
+            10.0,
+            false,
+            false,
+            false,
+        );
+        b.make_nurb(&k).unwrap();
+        let domain = a.rev().base().natural_uv_domain();
+        let other = b.rev().base().natural_uv_domain();
+        let (more, out) = a
+            .intersect_with_cone(&k, &domain, &b, &other, Some(1e-7))
+            .unwrap();
+        // Two coaxial cones take the general intersector, never an analytic circle.
+        assert!(
+            more,
+            "two coaxial cones fall back to the general intersector"
+        );
+        assert!(
+            more || (!out.curve_types.is_empty()
+                && out
+                    .curve_types
+                    .iter()
+                    .all(|t| *t == TsectCurveType::Touching)),
+            "more={more} curve_types={:?}",
+            out.curve_types
+        );
     }
 }

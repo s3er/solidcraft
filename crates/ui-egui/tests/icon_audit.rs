@@ -1,4 +1,7 @@
 //! Runtime icon discovery: use the same headless UI and requests as control clients.
+// Test helpers outside #[test] functions print what they skip or measure; clippy.toml
+// `allow-print-in-tests` covers only #[test] functions and #[cfg(test)] code.
+#![allow(clippy::print_stderr)]
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -474,8 +477,24 @@ fn requested_menu_icons_have_artwork_and_match_manifest() {
     escape(&mut h);
     h.app.start("inspect.colored_components");
     click(&mut h, "appbar:file");
-    assert!(h.widget("Export Current View as DXF…").is_some(), "painted File rows retain accessible action labels");
     collect(&mut h, "File", &mut requested);
+    for (group, category) in [
+        ("Insert", None),
+        ("Export", Some("CAD & 2D")),
+        ("Export", Some("Mesh")),
+        ("Export", Some("Scene")),
+        ("Export", Some("Simulation & Robotics")),
+        ("Settings", None),
+    ] {
+        escape(&mut h);
+        click(&mut h, "appbar:file");
+        click(&mut h, &format!("menu:{group}"));
+        if let Some(category) = category {
+            click(&mut h, &format!("menu:{category}"));
+        }
+        collect(&mut h, group, &mut requested);
+    }
+    assert!(requested.contains_key("mesh_import"));
     escape(&mut h);
     click(&mut h, "appbar:help");
     collect(&mut h, "Help", &mut requested);
@@ -646,10 +665,13 @@ fn requested_menu_icons_have_artwork_and_match_manifest() {
         h.call("ui.selectOther", json!({"close":true}));
     }
 
-    // Search every command by its full label so results beyond the first page are painted.
+    // Search every command by its full label so results beyond the first page are painted. Search
+    // leaves a script-only command out of a search by name and lists it for its exact id (#9734),
+    // so such a command is searched by its id and its icon is painted too.
     for command in solidcraft_engine::command_specs() {
+        let by_label = solidcraft_ui_egui::shortcut_box::search(&h.app, command.label).iter().any(|row| row.0 == command.id);
         solidcraft_ui_egui::shortcut_box::open(&mut h.app, None);
-        h.app.sbox.text = command.label.to_owned();
+        h.app.sbox.text = if by_label { command.label } else { command.id }.to_owned();
         h.frames(2);
         collect(&mut h, command.id, &mut requested);
         escape(&mut h);
@@ -766,6 +788,7 @@ fn requested_menu_icons_have_artwork_and_match_manifest() {
     for (name, source) in [
         ("dimensions and constraints", include_str!("scenarios/s11_sketch_constraints.json")),
         ("corner popup", include_str!("scenarios/sketch_corner_window.json")),
+        ("flange corner cards", include_str!("scenarios/sheet_flange_corner_cards.json")),
         ("sketch palette", include_str!("scenarios/sketch_palette_linetype_icons.json")),
         ("sketch Select Other", include_str!("scenarios/select_other_coincident_lines.json")),
         ("canvas calibration", include_str!("scenarios/s19_canvas_calibrate.json")),
@@ -830,7 +853,17 @@ fn audit_is_opt_in_drains_and_records_resolved_aliases() {
 #[test]
 fn offset_mode_artwork_review() {
     use solidcraft_theme::{ColorVision, Tokens};
-    let names = ["offset", "offset_two_sides", "offset_symmetric", "sketch_chamfer", "sketch_chamfer_two_distances", "split_body"];
+    let names = [
+        "offset",
+        "offset_two_sides",
+        "offset_symmetric",
+        "sketch_chamfer",
+        "sketch_chamfer_two_distances",
+        "split_body",
+        "gusset_side_negative",
+        "gusset_side_center",
+        "gusset_side_positive",
+    ];
     let mut sheet = tiny_skia::Pixmap::new(400, names.len() as u32 * 88).unwrap();
     for (row, name) in names.iter().enumerate() {
         let resolved = icon_svg::resolve(name);

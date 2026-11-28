@@ -104,6 +104,7 @@ use crate::geom::extent2d::Extent2d;
 use crate::geom::vector2d::Point2;
 use crate::geom::vector3d::{Point3, Vec3};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{EFF_ZERO, EFF_ZERO_PARAM};
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
@@ -449,9 +450,11 @@ pub(super) fn generator_crosses_plane(
     })
 }
 
-/// Bounds the whole output curve using the same control-net enclosure as patches.
-pub(super) fn curve_plane_deviation(curve: &Curve, plane: &Plane) -> Option<f64> {
-    plane_deviation(&net_points(curve)?, plane)
+impl Plane {
+    /// Bounds the distance of the whole trimmed curve to this plane using its control net.
+    pub(in crate::surface) fn curve_deviation(&self, curve: &Curve) -> Option<f64> {
+        plane_deviation(&net_points(curve)?, self)
+    }
 }
 
 /// Bounds the whole output curve's distance to the bounded source extrusion.
@@ -1529,7 +1532,7 @@ fn past_end(k: &Kernel, inputs: &PatchInputs<'_>, end: f64, dir: f64) -> Result<
     // (j counts from the first difference, D_1)
     let power = j + 1;
     let pf = p as f64;
-    let lower = |t: f64| (a_lo * t.powi(power as i32) - eps * pf * t) / w_max - c0_abs;
+    let lower = |t: f64| (a_lo * det::powi(t, power as i32) - eps * pf * t) / w_max - c0_abs;
     // the extent of the generator over [0, t] from the end point
     let reach = cps
         .iter()
@@ -2318,7 +2321,7 @@ mod tests {
     /// cut polygon, the in-plane bound `close_ring` returns for it.
     #[test]
     fn slab_ring_merges_cuts_on_two_sides_into_their_corner() {
-        let d = 2f64.powi(-10);
+        let d = det::powi(2f64, -10);
         let dom = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
         let plane = z_plane(1e12, &dom);
         let at = |x: f64, y: f64, rx: f64, ry: f64| {

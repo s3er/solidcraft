@@ -183,6 +183,7 @@ fn shell_planar_format13_keeps_v12_documents_and_refuses_future() {
     crate::format::pieces_in_shell_order(&mut legacy["features"]);
     for f in legacy["features"].as_array_mut().into_iter().flatten() {
         f["kernel_piece_order"] = json!(true);
+        f["least_face_piece_order"] = json!(true);
     }
     assert_eq!(legacy, current, "the migration preserves every prior field");
     legacy["format"] = json!(crate::format::format_string(crate::format::FORMAT + 1));
@@ -216,7 +217,16 @@ fn regularized_shell_keeps_legacy_and_explicit_single_face_projections_closed() 
             let source = solidcraft_sketch::LinkSource::Face { body: "Case".into(), at: point };
             let (values, _) = doc.param_values();
             let legacy = crate::project::resolve(&doc, &values, &state, &plane, solidcraft_sketch::LinkKind::Project, &source).unwrap();
-            let explicit = crate::project::resolve_face_indices(&state, &plane, solidcraft_sketch::LinkKind::Project, "Case", &[index]).unwrap();
+            let explicit = crate::project::resolve_face_indices(
+                &state,
+                &plane,
+                solidcraft_sketch::LinkKind::Project,
+                "Case",
+                &[index],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
             assert_eq!(legacy.geom, explicit.geom);
             assert_eq!(explicit.geom.len(), 4, "raw planar piece keeps all four edges");
             let mut sketch = solidcraft_sketch::Sketch::new();
@@ -416,6 +426,10 @@ fn saved_stepped_tab_cut_piece_projection_is_named_lost_without_expanding_materi
             tool_features: Vec::new(),
             operation: crate::Operation::Join,
             keep_tools: false,
+            offset: None,
+            offset_edges: crate::OffsetEdges::Sharp,
+            offset_faces: Vec::new(),
+            offset_radius: None,
         },
         None,
     )
@@ -437,6 +451,10 @@ fn saved_stepped_tab_cut_piece_projection_is_named_lost_without_expanding_materi
             tool_features: Vec::new(),
             operation: crate::Operation::Cut,
             keep_tools: false,
+            offset: None,
+            offset_edges: crate::OffsetEdges::Sharp,
+            offset_faces: Vec::new(),
+            offset_radius: None,
         },
         Some("Pocket"),
     )

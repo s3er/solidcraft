@@ -111,6 +111,7 @@
 //! - **Recursion.** A surface in a volume also recurses (into its base surface), after
 //!   checking its owned geometry nests at most `MAX_GEOMETRY_NESTING` (32) deep.
 
+use crate::math::det;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
@@ -118,6 +119,7 @@ use crate::curve::curve::p1::GlobalPointSolveOptions;
 use crate::curve::curve::p2::TANGENT_FIELD_TYPE;
 use crate::curve::curve::p7::PropertyAnalysisOptions;
 use crate::curve::curve::{Curve, CurveKind, CurvePropertyType};
+use crate::error::nurbs::NurbsFailure;
 use crate::error::{ignore_status, Result, SolidError};
 use crate::geom::a_object;
 use crate::geom::assert_array::labels::{
@@ -147,6 +149,7 @@ use crate::math::{
     EFF_ZERO_SQ, EFF_ZERO_SQRT, PI, UNDEF_DOUBLE,
 };
 use crate::nurbs::b_spline_curve::BSplineCurve;
+use crate::nurbs::b_spline_surface::p1::ControlPointNet;
 use crate::nurbs::b_spline_surface::{BSplineSurface, SurfParamType};
 use crate::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
 use crate::nurbs::knots::Side;
@@ -762,6 +765,25 @@ fn make_nurb<'a>(k: &Kernel, s: &'a Surface) -> Result<Option<Cow<'a, BSplineSur
     })
 }
 
+/// (not upstream) Whether `s` fails `SmBSplineSurface` test #2 as [`Surface::assert_valid`]
+/// runs it: degree + 1 control points of a span of its net coincident within the test's
+/// tolerance, `ZONE_TOL_3D / 10` ([`has_internal_pole`]). A surface whose net is one point or
+/// one curve (where the test is not run) never fails it.
+///
+/// # Errors
+///
+/// Those of the NURB's making, the degeneracy tests and [`has_internal_pole`].
+pub(crate) fn fails_internal_pole_test(k: &Kernel, s: &Surface) -> Result<bool> {
+    let Some(part) = make_nurb(k, s)? else {
+        return Ok(false);
+    };
+    let tol = ZONE_TOL_3D / 10.0;
+    if s.is_degenerate_point(k, tol, None)? || s.is_degenerate_curve(k, EFF_ZERO_DEG, None, tol)? {
+        return Ok(false);
+    }
+    has_internal_pole(k, s, &part, tol)
+}
+
 /// `SmBSplineSurface::AssertValid`.
 fn b_spline_surface_assert_valid(k: &Kernel, s: &Surface, r: &mut Reporter<'_>) -> Result<bool> {
     let mut rtn = true;
@@ -832,10 +854,148 @@ fn b_spline_surface_assert_valid(k: &Kernel, s: &Surface, r: &mut Reporter<'_>) 
             closed_row,
             closed_col,
         )?;
+        let non_monotonic =
+            non_monotonic && (closed_row || closed_col || !certify_monotone_net(&part, &net)?);
         rtn &= r.report(B_SPLINE_SURFACE_TYPE, 5, 0, !non_monotonic, UNDEF, UNDEF)?;
     }
 
     Ok(rtn)
+}
+
+/// With positive weights a control line whose successive points advance along
+/// its chord has a monotone projection. Require a margin for the Euclidean
+/// conversion, the two differences and their dot product.
+fn advancing_control_lines(net: &ControlPointNet, interior: bool) -> Result<bool> {
+    let (nu, nv) = (net.u_count, net.v_count);
+    if nv == 0 {
+        return Err(invalid("control line stride is zero"));
+    }
+    if nu < 2 || nv < 2 {
+        return Ok(false);
+    }
+    let advances = |start: usize, stride: usize, count: usize| {
+        let point = |i: usize| net.points.get(i.checked_mul(stride)?.checked_add(start)?);
+        let Some((&a, &b)) = point(0).zip(point(count - 1)) else {
+            return false;
+        };
+        let chord = b - a;
+        let length = chord.length();
+        let line = || (0..count).map_while(point);
+        let mut previous_step = None;
+        line().zip(line().skip(1)).all(|(&p, &q)| {
+            let step = q - p;
+            // Every step that passes the projection bound exceeds its rounding.
+            // Keep test #5's turns on the original interior lines.
+            if interior
+                && previous_step
+                    .replace(step)
+                    .is_some_and(|last| turns_back(step, last))
+            {
+                return false;
+            }
+            step.dot(chord)
+                > step_within_rounding(p, q) * length
+                    + step.length() * step_within_rounding(a, b)
+                    + gamma(5) * step.length() * length
+        })
+    };
+    let skip = usize::from(interior);
+    Ok((skip..nu - skip).all(|u| {
+        u.checked_mul(nv)
+            .is_some_and(|start| advances(start, 1, nv))
+    }) && (skip..nv - skip).all(|v| advances(v, nv, nu)))
+}
+
+/// Knot insertion preserves the surface and its parameterization. A high-degree
+/// control polygon may zigzag although the curve it controls is strictly monotone.
+/// Only accept the second representation when every open control line advances
+/// strictly along its chord and passes the original turns test.
+fn certify_monotone_net(part: &BSplineSurface, original: &ControlPointNet) -> Result<bool> {
+    const MAX_POINTS: usize = 32_768;
+    // Only exterior control lines are boundary curves of a clamped patch.
+    // A reversal in an interior control line retains the original rejection.
+    if original.points.len() > MAX_POINTS
+        || original.weights.iter().any(|w| !w.is_finite() || *w <= 0.0)
+        || !advancing_control_lines(original, true)?
+    {
+        return Ok(false);
+    }
+    for direction in [SurfParamType::U, SurfParamType::V] {
+        let (_, multiplicities) = part.knots(direction, None)?;
+        let end = Some(part.degree(direction) + 1);
+        if multiplicities.first().copied() != end || multiplicities.last().copied() != end {
+            return Ok(false);
+        }
+    }
+    let mut refined = part.clone();
+    for (direction, transverse) in [
+        (SurfParamType::V, SurfParamType::U),
+        (SurfParamType::U, SurfParamType::V),
+    ] {
+        let degree = refined.degree(direction);
+        if degree < 3 {
+            continue;
+        }
+        for _ in 0..3 {
+            let (knots, _) = refined.knots(direction, None)?;
+            let along = refined.number_control_points(direction);
+            let across = refined.number_control_points(transverse);
+            let extra = knots.len().saturating_sub(1).saturating_mul(degree);
+            if along.saturating_add(extra).saturating_mul(across) > MAX_POINTS {
+                break;
+            }
+            let mut insert = Vec::new();
+            for pair in knots.windows(2) {
+                let &[lo, hi] = pair else { continue };
+                let mid = lo + (hi - lo) * 0.5;
+                if lo < mid && mid < hi {
+                    insert.extend(std::iter::repeat_n(mid, degree));
+                }
+            }
+            if insert.is_empty() {
+                break;
+            }
+            if !insert_refinement_knots(&mut refined, direction, &insert)? {
+                return Ok(false);
+            }
+            let net = refined.control_point_net()?;
+            if net.weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+                return Ok(false);
+            }
+            if advancing_control_lines(&net, false)?
+                && !grid_has_non_monotonic_points_to_rounding(
+                    &net.points,
+                    net.v_count,
+                    false,
+                    false,
+                )?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// A parameter on or outside a knot endpoint refuses this refinement. Other
+/// insertion failures retain their operation and cause.
+fn insert_refinement_knots(
+    surface: &mut BSplineSurface,
+    direction: SurfParamType,
+    knots: &[f64],
+) -> Result<bool> {
+    match surface.insert_knots(direction, knots) {
+        Ok(()) => Ok(true),
+        Err(e)
+            if matches!(
+                e.root_cause().nurbs_failure(),
+                Some(NurbsFailure::Parameter)
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// `SmBSplineSurface::HasKnotMultiplicityGreaterThanDegree`
@@ -1270,6 +1430,12 @@ impl Zero {
     }
 }
 
+/// Test #5's turn between two successive differences that carry a direction.
+fn turns_back(v1: Vec3, v0: Vec3) -> bool {
+    let ang_rad = v1.angle_between(v0).unwrap_or(0.0); // out: 0 to Pi
+    rad_to_deg(ang_rad) > 170.0
+}
+
 /// [`grid_has_non_monotonic_points`] over a way of recognising a step that carries no
 /// direction (`zero`), passing over such a step instead of making it the last difference
 /// where `zero` says so.
@@ -1294,12 +1460,6 @@ fn grid_non_monotonic(
     let row_cnt = size / row_size;
     let monotonic_col = true;
     let mut monotonic_row = true;
-
-    // turn test between two successive differences
-    let turns_back = |v1: Vec3, v0: Vec3| -> bool {
-        let ang_rad = v1.angle_between(v0).unwrap_or(0.0); // out: 0 to Pi
-        rad_to_deg(ang_rad) > 170.0
-    };
 
     // First the rows (constant i, varying j)
     let mut idx = 0;
@@ -1679,7 +1839,7 @@ fn rev_of(s: &Surface) -> Result<&SurfOfRevolution> {
 /// 90 degrees, where cos is tiny), and then it is the larger term.
 fn generator_scale_tolerance(line_scale: f64, half_angle: f64) -> f64 {
     let angle_rounding = 4.0 * f64::EPSILON * half_angle.abs();
-    let conditioning = half_angle.sin().abs() / (half_angle.cos() * half_angle.cos());
+    let conditioning = det::sin(half_angle).abs() / (det::cos(half_angle) * det::cos(half_angle));
     (1.0 + line_scale) * EFF_ZERO + conditioning * angle_rounding
 }
 
@@ -1905,8 +2065,8 @@ fn surf_of_revolution_assert_valid(k: &Kernel, s: &Surface, r: &mut Reporter<'_>
         let uv_domain = s.natural_uv_domain_with_nurb(k)?;
         let ivl = gen.natural_interval();
         let anal_min_x = anal.min().x;
-        let cos = (anal_min_x * PI / 180.0).cos();
-        let sin = (anal_min_x * PI / 180.0).sin();
+        let cos = det::cos(anal_min_x * PI / 180.0);
+        let sin = det::sin(anal_min_x * PI / 180.0);
         let pos = rev.position();
         let o = pos.origin();
         let x = pos.x_axis();
@@ -2324,7 +2484,7 @@ fn cone_assert_valid(k: &Kernel, s: &Surface, r: &mut Reporter<'_>) -> Result<bo
     if let Some(line) = line {
         let line_scale = line.line_scale();
         let half_angle = cone.semi_angle_deg() * (PI / 180.0);
-        let cone_scale = 1.0 / half_angle.cos();
+        let cone_scale = 1.0 / det::cos(half_angle);
         let tol = generator_scale_tolerance(line_scale, half_angle);
         // A tolerance at least as large as the scale it checks means the stored angle no
         // longer fixes even the magnitude of `1/cos` (it may have rounded to 90 degrees), so
@@ -3211,6 +3371,105 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_control_line_stride_returns_invalid_input() {
+        let net = ControlPointNet {
+            u_count: 2,
+            v_count: 0,
+            points: Vec::new(),
+            weights: Vec::new(),
+        };
+        assert!(matches!(
+            advancing_control_lines(&net, false),
+            Err(SolidError::InvalidInput {
+                operation: OP,
+                reason: "control line stride is zero",
+            })
+        ));
+    }
+
+    #[test]
+    fn refinement_refuses_an_end_knot_and_preserves_other_errors() {
+        let surface = bspline(3, 3, &BEZ3, &BEZ3, &bicubic_points());
+        let mut part = make_nurb(&Kernel::default(), &surface)
+            .unwrap()
+            .unwrap()
+            .into_owned();
+        let direction = SurfParamType::V;
+        assert!(!insert_refinement_knots(&mut part, direction, &[0.0]).unwrap());
+        let expected = part.insert_knots(direction, &[]).unwrap_err();
+        let error = insert_refinement_knots(&mut part, direction, &[]).unwrap_err();
+        assert_eq!(
+            error.root_cause().nurbs_failure(),
+            Some(&NurbsFailure::Input)
+        );
+        assert_eq!(error, expected);
+    }
+
+    #[test]
+    fn an_interior_control_line_turn_is_retained_in_either_direction() {
+        let k = Kernel::default();
+        for along_u in [false, true] {
+            let (nu, nv) = if along_u { (4, 3) } else { (3, 4) };
+            let mut points = Vec::new();
+            for u in 0..nu {
+                for v in 0..nv {
+                    let (row, column) = if along_u { (v, u) } else { (u, v) };
+                    // The central line turns through 171.4°, yet each step
+                    // advances along its chord. Across it the turn is only 168.6°.
+                    let z = match (row, column) {
+                        (1, 1) => 10.0,
+                        (1, 2) => -10.0,
+                        _ => 0.0,
+                    };
+                    points.push([f64::from(u), f64::from(v), z]);
+                }
+            }
+            let surface = if along_u {
+                bspline(3, 2, &BEZ3, &BEZ2, &points)
+            } else {
+                bspline(2, 3, &BEZ2, &BEZ3, &points)
+            };
+            let part = make_nurb(&k, &surface).unwrap().unwrap();
+            let net = part.control_point_net().unwrap();
+            assert!(grid_has_non_monotonic_points_to_rounding(
+                &net.points,
+                net.v_count,
+                false,
+                false
+            )
+            .unwrap());
+            assert!(!certify_monotone_net(&part, &net).unwrap());
+        }
+    }
+
+    #[test]
+    fn boundary_control_polygon_can_reverse_on_a_monotone_curve() {
+        let k = Kernel::default();
+        // In v the last row is a cubic. For the first polygon the derivative
+        // has positive minimum at its middle. The second truly turns back.
+        for (ys, valid) in [([0.0, 0.6, 0.4, 1.0], true), ([0.0, 2.0, -1.0, 1.0], false)] {
+            let points: Vec<_> = [0.0, 1.0]
+                .into_iter()
+                .flat_map(|x| {
+                    let y = if x == 0.0 { [0.0, 0.3, 0.7, 1.0] } else { ys };
+                    y.map(move |v| [x, v, 0.0])
+                })
+                .collect();
+            let s = bspline(1, 3, &[0.0, 0.0, 1.0, 1.0], &BEZ3, &points);
+            let part = make_nurb(&k, &s).unwrap().unwrap();
+            let net = part.control_point_net().unwrap();
+            assert!(grid_has_non_monotonic_points_to_rounding(
+                &net.points,
+                net.v_count,
+                false,
+                false
+            )
+            .unwrap());
+            assert_eq!(certify_monotone_net(&part, &net).unwrap(), valid);
+        }
+    }
+
+    #[test]
     fn b_spline_net_doubles_back() {
         let mut pts = bicubic_points();
         pts[2 * 4 + 1] = [0.2, 1.0, 0.0];
@@ -3637,7 +3896,7 @@ mod tests {
     /// degrees, where the propagated tolerance is about 1e-7 of the scale, not a refusal.
     #[test]
     fn consistent_cone_at_89_999999_degrees_is_accepted() {
-        let height = 1000.0 * (1e-6_f64).to_radians().tan();
+        let height = 1000.0 * det::tan((1e-6_f64).to_radians());
         let s = Surface::from(Cone::new_bounded(
             O,
             X,
@@ -3656,15 +3915,15 @@ mod tests {
 
     #[test]
     fn generator_scale_tolerance_still_refuses_a_wrong_scale() {
-        let half_angle = (2.65_f64).atan2(1.3e-5);
-        let scale = 1.0 / half_angle.cos();
+        let half_angle = det::atan2(2.65_f64, 1.3e-5);
+        let scale = 1.0 / det::cos(half_angle);
         let tol = generator_scale_tolerance(scale, half_angle);
         // the rounding of the angle is covered ...
         assert!(tol > 1e-6 && tol < 1e-4, "{tol}");
         // ... a scale off by 1e-6 of itself, or by 1e-9 on a gentle cone, is not
         assert!(scale * 1e-6 > tol);
         let gentle = 0.3_f64;
-        let tol = generator_scale_tolerance(1.0 / gentle.cos(), gentle);
+        let tol = generator_scale_tolerance(1.0 / det::cos(gentle), gentle);
         assert!(1e-9 > tol, "{tol}");
     }
 

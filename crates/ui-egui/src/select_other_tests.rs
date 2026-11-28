@@ -32,6 +32,7 @@ fn select_other_feedback_is_local_when_the_browser_hover_expires() {
         dialog: false,
         include_hidden: h.app.preferences.select_other_hidden,
         held: Default::default(),
+        shown: false,
     });
     let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0))), ..Default::default() };
     h.ctx
@@ -377,7 +378,7 @@ fn long_names_stay_inside_the_popup_and_remain_available_on_hover() {
             _ => None,
         })
         .expect("the body label is painted");
-    let popup = h.ctx.memory(|m| m.area_rect(egui::Id::unique("sc_select_other"))).unwrap();
+    let popup = crate::ui_kit::Menu::level_rect(&h.ctx, egui::Id::unique("sc_select_other"), 0).unwrap();
     let text_rect = egui::Rect::from_min_size(text.pos, text.galley.size());
     assert!(popup.contains_rect(text_rect), "{text_rect:?} spills outside {popup:?}");
     assert!(h.ctx.content_rect().contains_rect(popup));
@@ -876,7 +877,8 @@ fn approximate_long_click_reaches_profiles_and_shows_all_eight_rows() {
         h.frames(4);
     }
     let rect = crate::scenario::rect_of("select_other").unwrap();
-    assert!(rect.height() > 8.0 * super::ROW_HEIGHT, "all eight rows plus header: {rect:?}");
+    let tokens = solidcraft_theme::Tokens::get();
+    assert!(rect.height() > 8.0 * (tokens.control_height + tokens.space_2), "all eight shared rows plus header: {rect:?}");
     for i in 0..8 {
         assert!(rect.contains(crate::scenario::handle_at(&format!("select_other:{i}")).unwrap()), "row {i}: {rect:?}");
     }
@@ -919,7 +921,7 @@ fn popup_uses_window_height_and_flips_above_the_pointer() {
             if y > 500.0 {
                 assert!(rect.bottom() <= y, "opens above the pointer: {rect:?}");
             } else if y < 500.0 {
-                assert!(rect.top() > y, "opens below the pointer: {rect:?}");
+                assert!(rect.top() >= y, "opens at or below the pointer: {rect:?}");
             }
         } else {
             assert!(!rect.contains(crate::scenario::handle_at(&format!("select_other:{}", count - 1)).unwrap()), "overflow needs scrolling");
@@ -1012,7 +1014,7 @@ fn hidden_edge_mode_is_scoped_and_invalidates_hover_without_pointer_motion() {
     assert!(pick_all(&h.app, &proj, pos).iter().any(target));
     for style in [0, 1, 2, 3] {
         h.app.ui.visual_style = style;
-        assert_eq!(pick_cached(&mut h.app, &proj, pos).iter().any(target), style >= 2, "style {style}");
+        assert!(pick_cached(&mut h.app, &proj, pos).iter().any(target), "style {style}");
     }
     h.app.session.visibility.hidden_bodies.push("Target".into());
     assert!(!pick_cached(&mut h.app, &proj, pos).iter().any(target));
@@ -1024,6 +1026,22 @@ fn hidden_edge_mode_is_scoped_and_invalidates_hover_without_pointer_motion() {
     h.app.session.section = Vec::new();
     h.call("ui.prefs", json!({"select_hidden_edges":false}));
     assert!(!pick_cached(&mut h.app, &proj, pos).iter().any(target));
+}
+
+#[test]
+fn edges_are_picked_through_faces_in_every_display_style_when_the_preference_is_on() {
+    use crate::viewport::{Hit, pick_all, pick_cached, projection};
+    let (mut h, pos) = covered_edge();
+    let proj = projection(&h.app, h.app.viewport.rect.unwrap());
+    let target = |hit: &Hit| matches!(hit, Hit::Edge { body, .. } if body == "Target");
+    for style in [0, 1, 2, 3] {
+        h.app.ui.visual_style = style;
+        h.app.preferences.select_hidden_edges = false;
+        assert_eq!(pick_cached(&mut h.app, &proj, pos).iter().any(target), style == 2, "off, style {style}");
+        h.app.preferences.select_hidden_edges = true;
+        assert!(pick_cached(&mut h.app, &proj, pos).iter().any(target), "on, style {style}");
+        assert!(pick_all(&h.app, &proj, pos).iter().any(target), "on, pick_all, style {style}");
+    }
 }
 
 #[test]
