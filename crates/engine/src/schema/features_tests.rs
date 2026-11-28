@@ -70,6 +70,7 @@ fn schemas_and_the_key_check_agree() {
             "start_offset",
             "symmetric_offset",
             "taper",
+            "taper2",
             "target_features",
             "targets",
             "thickness",
