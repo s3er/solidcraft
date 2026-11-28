@@ -3798,6 +3798,8 @@ pub(crate) fn hint(inp: &SelInput) -> &'static str {
         "click faces to remove, or a body in the Browser for a closed hollow"
     } else if a == selection::FEATURES {
         "click steps in the History or the Browser"
+    } else if a & BODIES != 0 && a & selection::FEATURES != 0 {
+        "click bodies, or click features in History or the Browser to follow their bodies"
     } else if a & BODIES != 0 {
         "click bodies"
     } else {
@@ -4225,7 +4227,26 @@ pub(crate) fn selection_label(s: &Session, names: crate::prefs::OriginPlaneNames
             let name = s.doc.point_clouds.iter().find(|c| c.id == *cloud).map(|c| c.name.as_str()).unwrap_or("Point Cloud");
             format!("{name} · {}", crate::snap_wake::label(*point))
         }
-        Sel::Feature { id } => s.doc.feature(*id).map(|f| f.name.clone()).unwrap_or_else(|| format!("Feature {id}")),
+        Sel::Feature { id } => {
+            let name = s.doc.feature(*id).map(|f| f.name.clone()).unwrap_or_else(|| format!("Feature {id}"));
+            if inp.accept & BODIES != 0 && inp.accept & selection::FEATURES != 0 {
+                let st = match d.editing {
+                    Some((eid, _)) => s.model.state_before(eid),
+                    None => s.model.state(),
+                };
+                match s.doc.feature(*id) {
+                    None => format!("{name} · missing feature"),
+                    Some(f) if f.suppressed => format!("{name} · Feature (suppressed)"),
+                    Some(_) => {
+                        let count = st.feature_body_names(*id).len();
+                        let unit = if count == 1 { "body" } else { "bodies" };
+                        format!("{name} · Feature ({count} {unit})")
+                    }
+                }
+            } else {
+                name
+            }
+        }
         Sel::Drawing { object, .. } => format!("Drawing object {object}"),
         Sel::Occurrence { path } if path.is_empty() => s.doc.name.clone(),
         Sel::Occurrence { path } => s.occurrence_placement(path).map(|p| p.name).unwrap_or_else(|_| "Component".into()),
@@ -4494,8 +4515,15 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
             let labels = crate::dialogs_frame::row_labels(s, names, d, i);
             egui::ScrollArea::vertical().id_salt(("picked_items", i)).max_height(t.control_height * 6.5).show(ui, |ui| {
                 for (index, item) in rows.into_iter().enumerate() {
-                    let label = labels.as_ref().and_then(|l| l.get(index).cloned()).unwrap_or_else(|| selection_label(s, names, d, inp, &item));
-                    let row = crate::ui_kit::list_row(ui, &format!("{}:{index}", inp.label), &label);
+                    let status = input_item_status(s, d, inp, &item);
+                    let mut label = labels.as_ref().and_then(|l| l.get(index).cloned()).unwrap_or_else(|| selection_label(s, names, d, inp, &item));
+                    if let Some((Some(suffix), _)) = status {
+                        label = format!("{label} · {suffix}");
+                    }
+                    let row = match status {
+                        Some((_, color)) => crate::ui_kit::list_row_colored(ui, &format!("{}:{index}", inp.label), &label, color),
+                        None => crate::ui_kit::list_row(ui, &format!("{}:{index}", inp.label), &label),
+                    };
                     if row.hovered() {
                         hovered = Some((i, item.clone()));
                     }
@@ -4933,6 +4961,34 @@ fn update_fill_cells(app: &SolveApp, d: &mut Dialog) {
     let kept: Vec<String> = cells.iter().filter(|c| c.2).map(|c| c.1.clone()).collect();
     *cells = found.into_iter().map(|(p, label)| (p, label.clone(), kept.is_empty() || kept.contains(&label))).collect();
     *of = tools;
+}
+
+/// Visual status of a picked body or feature in a dialog's picked-items list: missing static
+/// bodies and deleted features show in `Tokens::error`, while suppressed or 0-body features show
+/// in `Tokens::warning` so broken inputs stand out for one-click removal.
+fn input_item_status(s: &Session, d: &Dialog, inp: &SelInput, item: &Sel) -> Option<(Option<&'static str>, egui::Color32)> {
+    if inp.accept & BODIES == 0 {
+        return None;
+    }
+    let t = Tokens::get();
+    let st = match d.editing {
+        Some((eid, _)) => s.model.state_before(eid),
+        None => s.model.state(),
+    };
+    match item {
+        Sel::Body { name } => {
+            let exists = st.body(name).is_some()
+                || (!s.doc.occurrences.is_empty() && s.placed_document().body_frames_with_source(&st).iter().any(|(w, ..)| w == name));
+            (!exists).then_some((Some("missing"), t.error))
+        }
+        Sel::Feature { id } if inp.accept & selection::FEATURES != 0 => match s.doc.feature(*id) {
+            None => Some((None, t.error)),
+            Some(f) if f.suppressed => Some((None, t.warning)),
+            Some(_) if st.feature_body_names(*id).is_empty() => Some((None, t.warning)),
+            Some(_) => None,
+        },
+        _ => None,
+    }
 }
 
 /// Extract deduplicated feature ids from `Sel::Feature` entries.

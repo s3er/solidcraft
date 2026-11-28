@@ -9453,8 +9453,12 @@ fn joined_into<'d>(doc: &'d Document, state: &ModelState, f: &Feature, name: &st
     now.filter(|b| state.body(b).is_some())
 }
 
-/// Resolve explicit body names together with every live (non-envelope) body created by
+/// Resolve explicit body names together with every live (non-envelope) body belonging to
 /// `features` (in model order), deduplicating by body name.
+///
+/// When `features` is non-empty, missing static bodies, deleted features, suppressed features, and
+/// features that currently produce 0 bodies emit warnings and are skipped so the remaining live
+/// bodies are still processed; an error is returned only when no live input bodies remain.
 pub(super) fn resolve_body_inputs(
     doc: &Document,
     st: &ModelState,
@@ -9464,7 +9468,22 @@ pub(super) fn resolve_body_inputs(
     warning: &mut Option<String>,
 ) -> Result<Vec<crate::BodyName>> {
     let mut out = Vec::with_capacity(explicit.len() + features.len());
+    if features.is_empty() {
+        for name in explicit {
+            if !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        return Ok(out);
+    }
+    let placed_names: Option<Vec<String>> = (!doc.occurrences.is_empty() && explicit.iter().any(|n| st.body(&n.0).is_none()))
+        .then(|| doc.body_frames_with_source(st).into_iter().map(|(w, ..)| w).collect());
     for name in explicit {
+        let exists = st.body(&name.0).is_some() || placed_names.as_ref().is_some_and(|p| p.iter().any(|w| w == &name.0));
+        if !exists {
+            append_warning(warning, format!("`{name}` is missing and was skipped"));
+            continue;
+        }
         if !out.contains(name) {
             out.push(name.clone());
         }
@@ -9472,7 +9491,8 @@ pub(super) fn resolve_body_inputs(
     let in_doc = doc.features.iter().any(|g| g.id == f.id);
     for id in features {
         let Some(src) = doc.feature(id.0) else {
-            return Err(DocError::Unknown(format!("feature `{id}`")));
+            append_warning(warning, format!("feature `{id}` no longer exists and was skipped"));
+            continue;
         };
         let before = !in_doc || doc.features.iter().take_while(|g| g.id != f.id).any(|g| g.id == id.0);
         if !before {
@@ -9493,6 +9513,10 @@ pub(super) fn resolve_body_inputs(
         if !found {
             append_warning(warning, format!("`{}` currently has no bodies", src.name));
         }
+    }
+    if out.is_empty() {
+        let detail = warning.as_deref().map_or_else(|| "no input bodies remain".to_string(), |w| format!("no input bodies remain: {w}"));
+        return Err(DocError::Invalid(detail));
     }
     Ok(out)
 }
@@ -21414,9 +21438,6 @@ fn eval_feature_kind(
             if st.body(target).is_none() {
                 return Err(DocError::Unknown(format!("body `{target}`")));
             }
-            if resolved_tools.is_empty() && !tool_features.is_empty() {
-                return Ok(());
-            }
             // Each body is kept in its own component's frame: a tool placed differently from the
             // target is moved into the target's frame, so it is combined where it is shown (#3383).
             // A tool placed exactly as the target is left as it is.
@@ -21588,9 +21609,6 @@ fn eval_feature_kind(
             };
             if k.iter().any(|x| !(x.is_finite() && *x > 1e-9 && *x < 1e6)) {
                 return Err(DocError::Invalid("scale factors must be positive".into()));
-            }
-            if resolved_bodies.is_empty() && !body_features.is_empty() {
-                return Ok(());
             }
             let o = match about {
                 None => origin.0,

@@ -665,7 +665,19 @@ fn targets(app: &SolveApp, d: &Dialog) -> (Vec<String>, Vec<Vec<u64>>) {
         if d.editing.is_none() {
             return (items(d, 0).body_names(), Vec::new());
         }
-        return (bodies_of(app, d), Vec::new());
+        // Keep explicit `Sel::Body` picks and expand `Sel::Occurrence` (if any), without expanding
+        // `Sel::Feature` into static body names — dynamic features stay in `body_features`.
+        let mut out = items(d, 0).body_names();
+        for sel in items(d, 0) {
+            if let Sel::Occurrence { path } = sel {
+                for name in app.session.occurrence_bodies(path, true).unwrap_or_default() {
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        return (out, Vec::new());
     }
     let components = items(d, 0)
         .iter()

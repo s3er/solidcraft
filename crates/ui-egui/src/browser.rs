@@ -3267,6 +3267,7 @@ impl Entry {
             app.session.selection.contains(s)
                 || matches!(s, Sel::Feature { id } if app.session.active_sketch == Some(*id))
                 || crate::dialogs_move::picked(app, s)
+                || (matches!(s, Sel::Feature { .. }) && app.dialog.as_ref().is_some_and(|d| d.items().contains(s)))
         })
     }
 }

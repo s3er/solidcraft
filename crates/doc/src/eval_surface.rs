@@ -51,9 +51,6 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
         FeatureKind::Stitch { bodies, body_features, tolerance } => {
             let tol = val(vals, tolerance, Kind::Length)?;
             let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
-            if resolved_bodies.is_empty() && !body_features.is_empty() {
-                return Ok(());
-            }
             let idx: Vec<usize> = resolved_bodies
                 .iter()
                 .map(|n| st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`"))))
@@ -77,9 +74,6 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
         FeatureKind::Thicken { bodies, body_features, thickness, symmetric, operation, targets, target_features } => {
             let t = val(vals, thickness, Kind::Length)?;
             let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
-            if resolved_bodies.is_empty() && !body_features.is_empty() {
-                return Ok(());
-            }
             let resolved_targets = if *operation == Operation::NewBody {
                 Some(crate::plain(targets))
             } else {

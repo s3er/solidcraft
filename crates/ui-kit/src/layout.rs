@@ -907,11 +907,17 @@ pub fn search_fold<R>(ui: &mut Ui, title: &str, count: usize, add: impl FnOnce(&
 /// Tokens: control_height, space_8, font_label, text and icon-button tokens.
 /// Picked-item row with a remove action. Tokens: `control_height, space_8, font_label, text; icon-button tokens`.
 pub fn list_row(ui: &mut Ui, key: &str, text: &str) -> Response {
+    list_row_colored(ui, key, text, Tokens::get().form_ink)
+}
+
+/// [`list_row`] with an explicit label colour (e.g. `Tokens::get().error` or `warning` for
+/// missing or empty dialog inputs).
+pub fn list_row_colored(ui: &mut Ui, key: &str, text: &str, color: egui::Color32) -> Response {
     let t = Tokens::get();
     let (rect, row) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), row_height()), egui::Sense::hover());
     let remove = egui::Rect::from_min_max(egui::pos2((rect.right() - row_height()).max(rect.left()), rect.top()), rect.max);
     let label = egui::Rect::from_min_max(rect.min, egui::pos2((remove.left() - t.space_8).max(rect.left()), rect.bottom()));
-    paint_text(ui, label, text, egui::FontId::proportional(t.font_label), t.form_ink, false);
+    paint_text(ui, label, text, egui::FontId::proportional(t.font_label), color, false);
     let response = ui.push_id(key, |ui| super::icon_button_at(ui, remove, "close", "Remove")).inner;
     solidcraft_ui_registry::publish_rect(&format!("dialog:list:{key}"), rect);
     solidcraft_ui_registry::publish_handle(&format!("dialog:list:{key}:remove"), remove.center());

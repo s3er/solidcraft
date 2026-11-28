@@ -6333,17 +6333,30 @@ fn feature_body_selection_dialogs_emit_and_restore_mixed_picks() {
     assert_eq!(scale_cmds[0].1["body_features"], json!([pat_id]));
     app.dialog = None;
 
-    // Move dialog accepts Sel::Feature and includes body_features.
+    // Move dialog accepts Sel::Feature (including a modifying feature like Combine) and does NOT
+    // expand it into static `bodies` when reopened for edit!
     app.start("solid.move");
     {
         let d = app.dialog.as_mut().unwrap();
         assert_eq!(d.inputs[0].accept, crate::selection::BODY_OR_FEATURE);
-        d.inputs[0].items = vec![Sel::Feature { id: pat_id }];
+        d.inputs[0].items = vec![Sel::Feature { id: combine_id }];
         if let crate::dialogs::Kind::Move { x, .. } = &mut d.kind {
             *x = "5 mm".into();
         }
     }
     let move_cmds = apply_commands(&app, app.dialog.as_ref().unwrap()).unwrap();
     assert_eq!(move_cmds[0].0, "solid.move");
-    assert_eq!(move_cmds[0].1["body_features"], json!([pat_id]));
+    assert_eq!(move_cmds[0].1["body_features"], json!([combine_id]));
+    let move_reply = app.run(&move_cmds[0].0, move_cmds[0].1.clone()).unwrap();
+    let move_id = move_reply["feature"].as_u64().unwrap();
+    app.dialog = None;
+
+    // Editing Move must keep only Sel::Feature and NOT expand it into static `bodies`!
+    let mut edit_move = crate::dialogs::for_feature(&app, move_id, None).unwrap();
+    edit_move.editing = Some((move_id, None));
+    assert_eq!(edit_move.inputs[0].items, vec![Sel::Feature { id: combine_id }]);
+    let edit_move_cmds = apply_commands(&app, &edit_move).unwrap();
+    let edit_params = edit_move_cmds[0].1.get("params").unwrap_or(&edit_move_cmds[0].1);
+    assert_eq!(edit_params["bodies"], json!([]));
+    assert_eq!(edit_params["body_features"], json!([combine_id]));
 }

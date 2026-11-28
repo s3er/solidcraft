@@ -2837,8 +2837,10 @@ fn feature_body_selection_works_across_multi_body_commands_and_targets() {
     let v4 = copy_vols(&s2);
     assert_eq!(v4.len(), 3);
     assert!(v4.iter().all(|v| (*v - 800.0).abs() < 1e-3), "{v4:?}");
-    // Decrease count to 1 (0 copy bodies): cut does NOT fall back to cutting Seed or KeepMe!
+    // Decrease count to 1 (0 copy bodies): cut errors (0 bodies left) and does NOT fall back to cutting Seed or KeepMe!
+    let ext_id = s2.doc.features.last().unwrap().id;
     s2.execute("parameters.change", &json!({"name": "n", "expression": "1"})).unwrap();
+    assert!(s2.model.result(ext_id).and_then(|r| r.error.as_ref()).is_some(), "0 target bodies left must error");
     assert!((volume(&s2, "Seed") - 1_000.0).abs() < 1e-3);
     assert!((volume(&s2, "KeepMe") - 4_000.0).abs() < 1e-3);
 
@@ -2888,6 +2890,32 @@ fn feature_body_selection_works_across_multi_body_commands_and_targets() {
     s4.execute("parameters.change", &json!({"name": "n", "expression": "5"})).unwrap();
     let bb2 = s4.model.state().body("Base").unwrap().mesh().bounds();
     assert!((bb2.min.y - 20.0).abs() < 1e-3 && (bb2.max.x - 50.0).abs() < 1e-3 && (bb2.max.z - 20.0).abs() < 1e-3, "got {bb2:?}");
+
+    // 5. NX-style partial failure tolerance: when one input produces 0 bodies (or is missing)
+    //    while another input still has live bodies, the feature warns and processes the remaining
+    //    bodies; it errors only when 0 live bodies remain.
+    let mut s5 = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
+    s5.execute("parameters.add", &json!({"name": "n", "expression": "2", "unit": ""})).unwrap();
+    let b5 = s5.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, 0], "body_name": "Keep"})).unwrap();
+    let b5_id = b5["feature"].as_u64().unwrap();
+    let p5 = s5
+        .execute("solid.pattern.rectangular", &json!({"bodies": ["Keep"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 25, "name": "TempPat"}))
+        .unwrap();
+    let p5_id = p5["feature"].as_u64().unwrap();
+    let mv_partial = s5
+        .execute("solid.move", &json!({"body_features": [p5_id, b5_id], "translate": [0, 15, 0], "name": "MovePartial"}))
+        .unwrap();
+    let mv_partial_id = mv_partial["feature"].as_u64().unwrap();
+    let mv_only = s5.execute("solid.move", &json!({"body_features": [p5_id], "translate": [0, 0, 10], "name": "MoveOnlyPat"})).unwrap();
+    let mv_only_id = mv_only["feature"].as_u64().unwrap();
+    // Shrink pattern to 1 (0 copies): MovePartial warns and STILL moves Keep; MoveOnlyPat errors (0 bodies left).
+    s5.execute("parameters.change", &json!({"name": "n", "expression": "1"})).unwrap();
+    let r_partial = s5.model.result(mv_partial_id).unwrap();
+    assert!(r_partial.error.is_none(), "remaining body must still be moved: {:?}", r_partial.error);
+    assert!(r_partial.warning.is_some(), "empty feature input must warn");
+    assert!((s5.model.state().body("Keep").unwrap().mesh().bounds().min.y - 15.0).abs() < 1e-3);
+    let r_only = s5.model.result(mv_only_id).unwrap();
+    assert!(r_only.error.is_some(), "0 bodies left must error");
 }
 
 /// A through-all cut whose joints are rounded to 9 decimals, the straight edge lying on

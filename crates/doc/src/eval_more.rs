@@ -142,9 +142,6 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             angle,
         } => {
             let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
-            if resolved_bodies.is_empty() && !body_features.is_empty() {
-                return Ok(());
-            }
             // A plane on either side is worked out now, so the bodies follow it when it moves.
             let (mut from, mut from_normal) = (from.0, from_normal.and_then(|n| n.normalized()));
             if let Some(p) = from_plane {
@@ -237,9 +234,6 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
         }
         FeatureKind::Remove { bodies, body_features } => {
             let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
-            if resolved_bodies.is_empty() && !body_features.is_empty() {
-                return Ok(());
-            }
             if resolved_bodies.is_empty() {
                 return Err(DocError::Invalid("no bodies to remove".into()));
             }

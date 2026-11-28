@@ -6378,7 +6378,27 @@ pub(crate) fn displayed_selection(app: &SolveApp, item: &Sel) -> Vec<Sel> {
     match item {
         Sel::Feature { id } => match crate::timeline::viewport_sel_of_feature(&app.session.doc, *id) {
             Some(construction) => vec![construction],
-            None => feature_geometry(app, *id),
+            None => {
+                // When the feature is picked or hovered in a feature-body input (`BODIES | FEATURES`),
+                // highlight the exact live bodies it resolves to rather than only faces made by `id`.
+                let as_feature_bodies = app.dialog.as_ref().is_some_and(|d| {
+                    d.inputs.iter().enumerate().any(|(idx, inp)| {
+                        inp.accept & crate::selection::BODIES != 0
+                            && inp.accept & crate::selection::FEATURES != 0
+                            && (inp.items.contains(item) || d.list_hover.as_ref().is_some_and(|(hi, hs)| *hi == idx && hs == item))
+                    })
+                });
+                if as_feature_bodies {
+                    let st = crate::open_meshing::shown_world(app);
+                    st.feature_body_names(*id)
+                        .into_iter()
+                        .filter(|name| app.body_visible(name))
+                        .map(|name| Sel::Body { name: name.to_string() })
+                        .collect()
+                } else {
+                    feature_geometry(app, *id)
+                }
+            }
         },
         Sel::Occurrence { path } => app
             .session
