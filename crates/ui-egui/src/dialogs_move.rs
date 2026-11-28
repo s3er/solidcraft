@@ -1349,7 +1349,19 @@ pub fn for_feature(
     feature: &solidcraft_engine::doc::FeatureKind,
     frame: &solidcraft_engine::doc::Mat,
 ) {
-    let solidcraft_engine::doc::FeatureKind::Move { bodies, body_features, translate, rotate_axis, rotate_about, origin, angle, copy, carry, leave, .. } = feature
+    let solidcraft_engine::doc::FeatureKind::Move {
+        bodies,
+        body_features,
+        translate,
+        rotate_axis,
+        rotate_about,
+        origin,
+        angle,
+        copy,
+        carry,
+        leave,
+        ..
+    } = feature
     else {
         return;
     };

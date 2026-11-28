@@ -10221,7 +10221,20 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d
         }
-        FeatureKind::Revolve { sketch, profiles, axis, angle, operation, targets, target_features, angle2, symmetric, convention, join_profile_arcs, to } => {
+        FeatureKind::Revolve {
+            sketch,
+            profiles,
+            axis,
+            angle,
+            operation,
+            targets,
+            target_features,
+            angle2,
+            symmetric,
+            convention,
+            join_profile_arcs,
+            to,
+        } => {
             let mut d = start("solid.revolve")?;
             let frame = feature_frame(s, f.component);
             let stored_axis = match axis {

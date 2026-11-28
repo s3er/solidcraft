@@ -2859,11 +2859,7 @@ fn feature_body_selection_works_across_multi_body_commands_and_targets() {
     let mut s4 = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
     s4.execute("parameters.add", &json!({"name": "n", "expression": "3", "unit": ""})).unwrap();
     s4.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, 0], "body_name": "Base"})).unwrap();
-    s4.execute(
-        "solid.box",
-        &json!({"length": 10, "width": 10, "height": 10, "corner": [8, 0, 0], "operation": "new", "body_name": "Tab"}),
-    )
-    .unwrap();
+    s4.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [8, 0, 0], "operation": "new", "body_name": "Tab"})).unwrap();
     let pat4 = s4
         .execute("solid.pattern.rectangular", &json!({"bodies": ["Tab"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 8, "name": "Tabs"}))
         .unwrap();
@@ -2902,9 +2898,7 @@ fn feature_body_selection_works_across_multi_body_commands_and_targets() {
         .execute("solid.pattern.rectangular", &json!({"bodies": ["Keep"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 25, "name": "TempPat"}))
         .unwrap();
     let p5_id = p5["feature"].as_u64().unwrap();
-    let mv_partial = s5
-        .execute("solid.move", &json!({"body_features": [p5_id, b5_id], "translate": [0, 15, 0], "name": "MovePartial"}))
-        .unwrap();
+    let mv_partial = s5.execute("solid.move", &json!({"body_features": [p5_id, b5_id], "translate": [0, 15, 0], "name": "MovePartial"})).unwrap();
     let mv_partial_id = mv_partial["feature"].as_u64().unwrap();
     let mv_only = s5.execute("solid.move", &json!({"body_features": [p5_id], "translate": [0, 0, 10], "name": "MoveOnlyPat"})).unwrap();
     let mv_only_id = mv_only["feature"].as_u64().unwrap();

@@ -9436,7 +9436,8 @@ thread_local! {
 fn joined_into<'d>(doc: &'d Document, state: &ModelState, f: &Feature, name: &str) -> Option<&'d str> {
     let mut now: Option<&'d str> = None;
     for g in doc.features.iter().take_while(|g| g.id != f.id).filter(|g| !g.suppressed) {
-        if let FeatureKind::Combine { target, tools, tool_features, operation: Operation::Join | Operation::NewBody, keep_tools: false, .. } = &g.kind {
+        if let FeatureKind::Combine { target, tools, tool_features, operation: Operation::Join | Operation::NewBody, keep_tools: false, .. } = &g.kind
+        {
             let current = now.unwrap_or(name);
             let by_name = tools.iter().any(|t| t.0.as_str() == current);
             let by_feature = !tool_features.is_empty()

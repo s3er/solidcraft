@@ -339,7 +339,8 @@ fn recover_align_projected_edge(b: &ModelBody, saved_body: &str, name: &str, nea
     for _ in 0..400 {
         let origin = ancestor.names.origin.as_ref()?;
         if let FeatureKind::Align { bodies, body_features, .. } = &origin.feature.kind
-            && (bodies.iter().any(|body| *body == ancestor.name) || body_features.iter().any(|id| origin.before.feature_has_body(id.0, &ancestor.name)))
+            && (bodies.iter().any(|body| *body == ancestor.name)
+                || body_features.iter().any(|id| origin.before.feature_has_body(id.0, &ancestor.name)))
             && read.faces.iter().any(|face| matches!(&face.base, Base::Made { feature, role: Role::Index(_) } if feature.0 == origin.feature.id))
         {
             if !from_saved_body {
