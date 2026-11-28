@@ -48,9 +48,13 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             Ok(())
         }
-        FeatureKind::Stitch { bodies, tolerance } => {
+        FeatureKind::Stitch { bodies, body_features, tolerance } => {
             let tol = val(vals, tolerance, Kind::Length)?;
-            let idx: Vec<usize> = bodies
+            let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
+            if resolved_bodies.is_empty() && !body_features.is_empty() {
+                return Ok(());
+            }
+            let idx: Vec<usize> = resolved_bodies
                 .iter()
                 .map(|n| st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`"))))
                 .collect::<Result<_>>()?;
@@ -70,10 +74,24 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             st.bodies.retain(|b| !gone.contains(&b.name));
             Ok(())
         }
-        FeatureKind::Thicken { bodies, thickness, symmetric, operation, targets } => {
+        FeatureKind::Thicken { bodies, body_features, thickness, symmetric, operation, targets, target_features } => {
             let t = val(vals, thickness, Kind::Length)?;
+            let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
+            if resolved_bodies.is_empty() && !body_features.is_empty() {
+                return Ok(());
+            }
+            let resolved_targets = if *operation == Operation::NewBody {
+                Some(crate::plain(targets))
+            } else {
+                resolve_target_inputs(doc, st, f, targets, target_features, warning)?
+            };
+            let (op, resolved_targets) = match resolved_targets {
+                Some(t) => (*operation, t),
+                None if *operation == Operation::Join => (Operation::NewBody, Vec::new()),
+                None => return Ok(()),
+            };
             let mut tools = Vec::new();
-            for n in bodies {
+            for n in &resolved_bodies {
                 let b = st.body(n).cloned().ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
                 // Kept face, offset and edge walls. Carry that history so a sketch can attach
                 // to the solid's faces and follow the thickness (#7641).
@@ -83,7 +101,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             if tools.is_empty() {
                 return Err(DocError::Invalid("pick the surfaces to thicken".into()));
             }
-            apply_traced(doc, st, f, tools, *operation, &crate::plain(targets))
+            apply_traced(doc, st, f, tools, op, &resolved_targets)
         }
         FeatureKind::SurfaceTrim { body, plane, tool, keep, keep_more, curves, with, keep_with, stitch, extend } => {
             let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;

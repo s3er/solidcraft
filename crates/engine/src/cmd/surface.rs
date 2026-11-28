@@ -645,23 +645,46 @@ fn bodies_param(s: &Session, p: &Value, cmd: &str) -> Result<Vec<String>> {
 
 fn stitch(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "surface.stitch";
-    let bodies = bodies_param(s, p, cmd)?;
+    let body_features = super::features::feature_body_refs(s, p, "body_features", cmd)?;
+    let bodies = if body_features.is_empty() {
+        bodies_param(s, p, cmd)?
+    } else {
+        let list = string_list(cmd, p, "bodies")?;
+        let st = s.model.state();
+        if let Some(b) = list.iter().find(|b| st.body(b).is_none()) {
+            return Err(bad(cmd, format!("no body `{b}`")));
+        }
+        list
+    };
     let tolerance = expr(p, "tolerance").unwrap_or_else(|| "0".into());
     check_expr(s, &tolerance, Kind::Length, cmd, "tolerance")?;
-    add_feature(s, p, FeatureKind::Stitch { bodies: bodies.into_iter().map(BodyName).collect(), tolerance })
+    add_feature(s, p, FeatureKind::Stitch { bodies: bodies.into_iter().map(BodyName).collect(), body_features, tolerance })
 }
 
 fn thicken(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "surface.thicken";
-    let bodies = bodies_param(s, p, cmd)?;
+    let body_features = super::features::feature_body_refs(s, p, "body_features", cmd)?;
+    let bodies = if body_features.is_empty() {
+        bodies_param(s, p, cmd)?
+    } else {
+        let list = string_list(cmd, p, "bodies")?;
+        let st = s.model.state();
+        if let Some(b) = list.iter().find(|b| st.body(b).is_none()) {
+            return Err(bad(cmd, format!("no body `{b}`")));
+        }
+        list
+    };
     let thickness = expr(p, "thickness").ok_or_else(|| bad(cmd, "`thickness` is required"))?;
     check_expr(s, &thickness, Kind::Length, cmd, "thickness")?;
+    let target_features = super::features::feature_body_refs(s, p, "target_features", cmd)?;
     let kind = FeatureKind::Thicken {
         bodies: bodies.into_iter().map(BodyName).collect(),
+        body_features,
         thickness,
         symmetric: bool_(p, "symmetric").unwrap_or(false),
         operation: operation(p, cmd)?,
         targets: string_list(cmd, p, "targets")?.into_iter().map(BodyName).collect(),
+        target_features,
     };
     add_feature(s, p, kind)
 }

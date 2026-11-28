@@ -2047,6 +2047,7 @@ mod tests {
             .add_feature(
                 FeatureKind::Extrude {
                     thin: None,
+                    target_features: Vec::new(),
                     sketch: crate::SketchId(sketch),
                     profiles: ProfileSel::All,
                     extent: Extent {

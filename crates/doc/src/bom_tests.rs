@@ -971,6 +971,7 @@ fn sketched(doc: &mut Document, component: u64, extrude_suppressed: Option<bool>
             extent: serde_json::from_value(json!({"distance": "2"})).unwrap(),
             operation: crate::Operation::NewBody,
             targets: vec![],
+            target_features: Vec::new(),
         };
         let id = doc.add_feature(extrude, None).unwrap();
         let f = doc.feature_mut(id).unwrap();

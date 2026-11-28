@@ -11,7 +11,7 @@ use solidcraft_geom::{Aabb3, ArcMap, Ring};
 
 pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState, warning: &mut Option<String>) -> Result<()> {
     match &f.kind {
-        FeatureKind::Emboss { sketch, profiles, depth, deboss, targets, face } => {
+        FeatureKind::Emboss { sketch, profiles, depth, deboss, targets, target_features, face } => {
             let ss = st.sketch(sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
             let regions = select_profiles(ss, profiles)?;
             let d = val(vals, depth, Kind::Length)?;
@@ -19,7 +19,8 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                 return Err(DocError::Invalid("the emboss depth must be positive".into()));
             }
             if let Some(face) = face {
-                if !targets.is_empty() && (targets.len() != 1 || targets.first() != Some(&face.body)) {
+                let resolved = resolve_target_inputs(doc, st, f, targets, target_features, warning)?.unwrap_or_default();
+                if !resolved.is_empty() && (resolved.len() != 1 || resolved.first().map(String::as_str) != Some(face.body.0.as_str())) {
                     return Err(DocError::Invalid("cylinder emboss must keep its selected target body".into()));
                 }
                 let i =
@@ -66,6 +67,9 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                 }
                 return Ok(());
             }
+            let Some(resolved_targets) = resolve_target_inputs(doc, st, f, targets, target_features, warning)? else {
+                return Ok(());
+            };
             let (a, b) = if *deboss { (-d, 0.0) } else { (0.0, d) };
             let tools = kernel::extrude(&ss.plane, &regions, a, b)?;
             if st.bodies.is_empty() {
@@ -75,7 +79,7 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             // side of the material, a depth that stops short) used to report success and change
             // nothing. Say so: the body is compared before and after, as the command's reply does.
             let before: Vec<Body> = st.bodies.iter().map(|b| b.body.clone()).collect();
-            apply_op(doc, st, f, tools, if *deboss { Operation::Cut } else { Operation::Join }, &crate::plain(targets))?;
+            apply_op(doc, st, f, tools, if *deboss { Operation::Cut } else { Operation::Join }, &resolved_targets)?;
             let unchanged = st.bodies.len() == before.len() && st.bodies.iter().zip(&before).all(|(b, old)| old.same(&b.body));
             if unchanged {
                 let what = if *deboss { "deboss" } else { "emboss" };
@@ -118,7 +122,25 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             Ok(())
         }
-        FeatureKind::Align { bodies, from, to, from_normal, to_normal, flip, from_plane, to_plane, axes, from_frame, to_frame, angle } => {
+        FeatureKind::Align {
+            bodies,
+            body_features,
+            from,
+            to,
+            from_normal,
+            to_normal,
+            flip,
+            from_plane,
+            to_plane,
+            axes,
+            from_frame,
+            to_frame,
+            angle,
+        } => {
+            let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
+            if resolved_bodies.is_empty() && !body_features.is_empty() {
+                return Ok(());
+            }
             // A plane on either side is worked out now, so the bodies follow it when it moves.
             let (mut from, mut from_normal) = (from.0, from_normal.and_then(|n| n.normalized()));
             if let Some(p) = from_plane {
@@ -194,10 +216,10 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                     m = crate::mat_mul(&rotation(apply_point(&m, from), n, a), &m);
                 }
             }
-            if bodies.is_empty() {
+            if resolved_bodies.is_empty() {
                 return Err(DocError::Invalid("no bodies to align".into()));
             }
-            for n in bodies {
+            for n in &resolved_bodies {
                 let i = st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
                 if let Some(mb) = st.bodies.get_mut(i) {
                     let nb = kernel::transform_matrix(&mb.body, m)?;
@@ -209,16 +231,20 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             }
             Ok(())
         }
-        FeatureKind::Remove { bodies } => {
-            if bodies.is_empty() {
+        FeatureKind::Remove { bodies, body_features } => {
+            let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
+            if resolved_bodies.is_empty() && !body_features.is_empty() {
+                return Ok(());
+            }
+            if resolved_bodies.is_empty() {
                 return Err(DocError::Invalid("no bodies to remove".into()));
             }
-            for n in bodies {
+            for n in &resolved_bodies {
                 if st.body(n).is_none() {
                     return Err(DocError::Unknown(format!("body `{n}`")));
                 }
             }
-            st.bodies.retain(|b| !bodies.iter().any(|t| *t == b.name));
+            st.bodies.retain(|b| !resolved_bodies.iter().any(|t| *t == b.name));
             Ok(())
         }
         _ => Err(DocError::Invalid(format!("{} is not evaluated here", f.name))),

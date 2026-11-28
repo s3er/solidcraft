@@ -155,7 +155,7 @@ crate::dialog_descriptor::dialog_descriptors! {
             angle: String = "0 deg".into() => angle.as_ref().map_or_else(|| "0 deg".to_string(), ToString::to_string),
         } => json!({"angle": angle});
         // Uniform, or per axis (#10782): then `factor` is X's, beside Y's and Z's.
-        Scale("solid.scale", "SCALE", [("Bodies", BODIES, true)],
+        Scale("solid.scale", "SCALE", [("Bodies", selection::BODY_OR_FEATURE, true)],
             FeatureKind::Scale { factor, factors, .. }) {
             factor: String = "2".into() => factors.as_ref().map_or_else(|| factor.to_string(), |f| f[0].to_string()),
             per_axis: bool = false => factors.is_some(),
@@ -166,7 +166,7 @@ crate::dialog_descriptor::dialog_descriptors! {
             FeatureKind::OffsetFace { distance, .. }) {
             distance: String = "2 mm".into() => shown_expr(distance, ValueKind::Length),
         } => json!({"distance": distance});
-        Stock("solid.bounding_solid", "STOCK", [("Bodies (all if none)", BODIES, true)],
+        Stock("solid.bounding_solid", "STOCK", [("Bodies (all if none)", selection::BODY_OR_FEATURE, true)],
             FeatureKind::BoundingSolid { margin, .. }) {
             margin: String = "2 mm".into() => shown_expr(margin, ValueKind::Length),
         } => json!({"margin": margin});
@@ -956,7 +956,9 @@ impl Dialog {
                 }
             }
         }
-        let Some(inp) = d.inputs.iter_mut().find(|i| i.accept == BODIES && (i.multi || i.items.is_empty())) else {
+        let Some(inp) =
+            d.inputs.iter_mut().find(|i| (i.accept == BODIES || i.accept == selection::BODY_OR_FEATURE) && (i.multi || i.items.is_empty()))
+        else {
             return;
         };
         for name in names {
@@ -1049,9 +1051,10 @@ impl Dialog {
                 vec![SelInput::new("Faces", PLANAR_FACES, true), SelInput::new("Target", PLANES | PLANAR_FACES, false)],
             ),
             "face.delete" => Dialog::new(Kind::DeleteFaces, vec![SelInput::new("Faces", FACES, true)]),
-            "solid.boundary_fill" => {
-                Dialog::new(Kind::BoundaryFill { operation: 0, cells: Vec::new(), of: Vec::new() }, vec![SelInput::new("Tools", BODIES, true)])
-            }
+            "solid.boundary_fill" => Dialog::new(
+                Kind::BoundaryFill { operation: 0, cells: Vec::new(), of: Vec::new() },
+                vec![SelInput::new("Tools", selection::BODY_OR_FEATURE, true)],
+            ),
             "solid.align" => {
                 let components = s.selection.iter().any(|x| matches!(x, Sel::Occurrence { .. }));
                 // Bodies also take sketch points and circles: a frame the bodies follow (#6257).
@@ -1060,13 +1063,17 @@ impl Dialog {
                 Dialog::new(
                     Kind::Align { flip: false, components, axes: [true; 3], angle: String::new() },
                     vec![
-                        SelInput::new(if components { "Components" } else { "Bodies" }, BODIES, true),
+                        SelInput::new(
+                            if components { "Components" } else { "Bodies" },
+                            if components { BODIES } else { selection::BODY_OR_FEATURE },
+                            true,
+                        ),
                         SelInput::new("From", picks, false),
                         SelInput::new("To", picks, false),
                     ],
                 )
             }
-            "solid.remove" => Dialog::new(Kind::Remove, vec![SelInput::new("Bodies", BODIES, true)]),
+            "solid.remove" => Dialog::new(Kind::Remove, vec![SelInput::new("Bodies", selection::BODY_OR_FEATURE, true)]),
             "solid.pattern.path" => Dialog::new(
                 Kind::PathPattern { count: "4".into(), spacing: length_default(s, "20"), start: String::new(), fraction: false },
                 vec![SelInput::new("Objects", BODIES, true), SelInput::new("Path", CURVES, true)],
@@ -1233,7 +1240,7 @@ impl Dialog {
             ),
             "solid.combine" => Dialog::new(
                 Kind::Combine { operation: 1, keep_tools: false },
-                vec![SelInput::new("Target Body", BODIES, false), SelInput::new("Tool Bodies", BODIES, true)],
+                vec![SelInput::new("Target Body", BODIES, false), SelInput::new("Tool Bodies", selection::BODY_OR_FEATURE, true)],
             ),
             _ => {
                 let (kind, inputs) = Kind::simple_start(id)
@@ -1324,7 +1331,7 @@ impl Dialog {
                 && let Sel::Occurrence { path } = sel
                 && !path.is_empty()
                 && let Some(inp) = d.inputs.first_mut()
-                && inp.accept == BODIES
+                && (inp.accept == BODIES || inp.accept == selection::BODY_OR_FEATURE)
             {
                 if !inp.items.contains(sel) {
                     inp.items.push(sel.clone());
@@ -1336,7 +1343,8 @@ impl Dialog {
                 _ => None,
             };
             if let Some(b) = as_body
-                && let Some(inp) = d.inputs.iter_mut().find(|i| i.accept == BODIES && (i.multi || i.items.is_empty()))
+                && let Some(inp) =
+                    d.inputs.iter_mut().find(|i| (i.accept == BODIES || i.accept == selection::BODY_OR_FEATURE) && (i.multi || i.items.is_empty()))
             {
                 if !inp.items.contains(&b) {
                     inp.items.push(b);
@@ -1346,7 +1354,8 @@ impl Dialog {
             // A selected component is its bodies when the command takes bodies. One selected
             // placement still starts component Move before this dialog is built.
             if let Sel::Occurrence { path } = sel
-                && let Some(inp) = d.inputs.iter_mut().find(|i| i.accept == BODIES && (i.multi || i.items.is_empty()))
+                && let Some(inp) =
+                    d.inputs.iter_mut().find(|i| (i.accept == BODIES || i.accept == selection::BODY_OR_FEATURE) && (i.multi || i.items.is_empty()))
             {
                 if let Ok(names) = s.occurrence_bodies(path, true) {
                     for name in names {
@@ -3148,7 +3157,7 @@ pub(crate) fn hint(inp: &SelInput) -> &'static str {
     } else if inp.label == "Faces/Body" {
         // Shell (#794): faces open the hollow; a body alone seals a closed void inside.
         "click faces to remove, or a body in the Browser for a closed hollow"
-    } else if a & selection::FEATURES != 0 {
+    } else if a == selection::FEATURES {
         "click steps in the History or the Browser"
     } else if a & BODIES != 0 {
         "click bodies"
@@ -3302,6 +3311,7 @@ fn align_object_type_row(d: &mut Dialog, ui: &mut egui::Ui) {
     if ty != cur {
         *components = ty == 1;
         inp.label = if *components { "Components" } else { "Bodies" };
+        inp.accept = if *components { BODIES } else { selection::BODY_OR_FEATURE };
         let back = d.other_objects.get_mut(ty).map(std::mem::take).unwrap_or_default();
         let items = std::mem::replace(&mut inp.items, back);
         if let Some(slot) = d.other_objects.get_mut(cur) {
@@ -4119,16 +4129,70 @@ fn update_fill_cells(app: &SolveApp, d: &mut Dialog) {
     if *of == tools {
         return;
     }
-    let names: Vec<String> = tools.body_names();
     // Editing: the tools as they were before this feature (it may have removed them).
     let st = match d.editing {
         Some((id, _)) => app.session.model.state_before(id),
         None => crate::open_meshing::session_world(&app.session),
     };
+    let names = resolve_sel_body_names(&app.session.doc, &st, &tools);
     let found = fill_cells(&st, &names);
     let kept: Vec<String> = cells.iter().filter(|c| c.2).map(|c| c.1.clone()).collect();
     *cells = found.into_iter().map(|(p, label)| (p, label.clone(), kept.is_empty() || kept.contains(&label))).collect();
     *of = tools;
+}
+
+/// Extract deduplicated feature ids from `Sel::Feature` entries.
+pub(crate) fn sel_feature_ids(items: &[Sel]) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for sel in items {
+        if let Sel::Feature { id } = sel
+            && !ids.contains(id)
+        {
+            ids.push(*id);
+        }
+    }
+    ids
+}
+
+/// Write `body_key` (if any bodies are picked) and `feature_key` (if any features are picked)
+/// into `p`, optionally excluding `exclude_body` from explicit body names.
+pub(crate) fn put_bodies_and_features(p: &mut Value, items: &[Sel], body_key: &str, feature_key: &str, exclude_body: Option<&str>) {
+    let bodies: Vec<String> = items.body_names().into_iter().filter(|n| exclude_body.is_none_or(|ex| n != ex)).collect();
+    let features = sel_feature_ids(items);
+    if !bodies.is_empty() {
+        p[body_key] = json!(bodies);
+    }
+    if !features.is_empty() {
+        p[feature_key] = json!(features);
+    }
+}
+
+/// Build mixed `Sel::Body` + `Sel::Feature` picks for editing a saved feature.
+pub(crate) fn body_and_feature_sels(bodies: &[solidcraft_engine::doc::BodyName], features: &[solidcraft_engine::doc::FeatureId]) -> Vec<Sel> {
+    bodies.iter().map(|n| Sel::Body { name: n.to_string() }).chain(features.iter().map(|id| Sel::Feature { id: id.0 })).collect()
+}
+
+/// Resolve mixed `Sel::Body` + `Sel::Feature` picks to their current live non-envelope body names.
+pub(crate) fn resolve_sel_body_names(doc: &solidcraft_engine::doc::Document, st: &solidcraft_engine::doc::ModelState, items: &[Sel]) -> Vec<String> {
+    let mut out = Vec::new();
+    for sel in items {
+        match sel {
+            Sel::Body { name } => {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            Sel::Feature { id } if doc.feature(*id).is_some_and(|f| !f.suppressed) => {
+                for name in st.feature_body_names(*id) {
+                    if !out.iter().any(|s| s == name) {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The cells a set of tool bodies makes: each region inside some of them and outside the rest,
@@ -5407,7 +5471,7 @@ fn set_extrude_targets(inputs: &mut Vec<SelInput>, active: &mut usize, extra: &m
     let at = inputs.iter().position(|i| i.label == EXTRUDE_TARGETS);
     match (at, tip) {
         (None, Some(tip)) => {
-            let mut input = SelInput::new(EXTRUDE_TARGETS, BODIES, true).tip(tip);
+            let mut input = SelInput::new(EXTRUDE_TARGETS, selection::BODY_OR_FEATURE, true).tip(tip);
             // An edited Intersect can have stored targets without a pick input. Moving to
             // Join or Cut transfers them into the input, which now owns the selection.
             if let Some(Value::Array(targets)) = extra.remove("targets") {
@@ -6355,7 +6419,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             if let Some(input) = extrude_targets
                 && !input.items.is_empty()
             {
-                common["targets"] = json!(input.items.body_names());
+                put_bodies_and_features(&mut common, &input.items, "targets", "target_features", None);
             }
             let with = |extra: Value| -> Value {
                 let mut p = common.clone();
@@ -6363,7 +6427,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     m.extend(e);
                     for (k, v) in &d.extra {
                         // The edited targets are in Target Bodies, emptied or not.
-                        if k == "targets" && extrude_targets.is_some() {
+                        if matches!(k.as_str(), "targets" | "target_features") && extrude_targets.is_some() {
                             continue;
                         }
                         m.entry(k.clone()).or_insert_with(|| v.clone());
@@ -6871,7 +6935,8 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 }
                 json!({"paths": paths, "flip": flip})
             } else {
-                let mut p = json!({"bodies": sels(d, 0).body_names(), "flip": flip});
+                let mut p = json!({"flip": flip});
+                put_bodies_and_features(&mut p, sels(d, 0), "bodies", "body_features", None);
                 if *axes != [true; 3] {
                     p["axes"] = json!(axes);
                 }
@@ -6932,7 +6997,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         }
         Kind::Remove => {
             need(0, "bodies")?;
-            ("solid.remove", json!({"bodies": sels(d, 0).body_names()}))
+            let mut p = json!({});
+            put_bodies_and_features(&mut p, sels(d, 0), "bodies", "body_features", None);
+            ("solid.remove", p)
         }
         Kind::PathPattern { count, spacing, start, fraction } => {
             need(0, "objects")?;
@@ -6957,7 +7024,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         Kind::Stock { .. } => {
             let mut p = json!({});
             if !sels(d, 0).is_empty() {
-                p["bodies"] = json!(sels(d, 0).body_names());
+                put_bodies_and_features(&mut p, sels(d, 0), "bodies", "body_features", None);
             }
             ("solid.bounding_solid", p)
         }
@@ -7019,7 +7086,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         }
         Kind::Scale { .. } => {
             need(0, "bodies")?;
-            ("solid.scale", json!({"bodies": sels(d, 0).body_names()}))
+            let mut p = json!({});
+            put_bodies_and_features(&mut p, sels(d, 0), "bodies", "body_features", None);
+            ("solid.scale", p)
         }
         Kind::OffsetFaces { .. } => {
             need(0, "faces")?;
@@ -7348,20 +7417,17 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             if picked.is_empty() {
                 return Err("tick the cells to fill".into());
             }
-            (
-                "solid.boundary_fill",
-                json!({"tools": sels(d, 0).body_names(), "cells": picked, "operation": OPS.get(*operation).copied().unwrap_or("new")}),
-            )
+            let mut p = json!({"cells": picked, "operation": OPS.get(*operation).copied().unwrap_or("new")});
+            put_bodies_and_features(&mut p, sels(d, 0), "tools", "tool_features", None);
+            ("solid.boundary_fill", p)
         }
         Kind::Combine { operation, keep_tools } => {
             need(0, "the target body")?;
             need(1, "tool bodies")?;
             let target = sels(d, 0).body_names().into_iter().next().unwrap_or_default();
-            let tools: Vec<String> = sels(d, 1).body_names().into_iter().filter(|n| *n != target).collect();
-            (
-                "solid.combine",
-                json!({"target": target, "tools": tools, "operation": OPS.get(*operation).copied().unwrap_or("join"), "keep_tools": keep_tools}),
-            )
+            let mut p = json!({"target": target, "operation": OPS.get(*operation).copied().unwrap_or("join"), "keep_tools": keep_tools});
+            put_bodies_and_features(&mut p, sels(d, 1), "tools", "tool_features", Some(&target));
+            ("solid.combine", p)
         }
         Kind::EditParam { name, expr } => ("parameters.change", json!({"name": name, "expression": expr})),
         Kind::Rename { feature, name } => ("timeline.rename", json!({"feature": feature, "name": name})),
@@ -8331,7 +8397,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
     let st = crate::open_meshing::session_world(s);
     let start = |cmd: &str| Dialog::for_command(app, cmd);
     let mut d = match &f.kind {
-        FeatureKind::Extrude { sketch, profiles, extent, operation, targets, thin } => {
+        FeatureKind::Extrude { sketch, profiles, extent, operation, targets, target_features, thin } => {
             let mut d = start("solid.extrude")?;
             d.kind = Kind::Extrude {
                 distance: extent.distance.to_string(),
@@ -8381,18 +8447,23 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                     inp.items = items.into_iter().map(|index| Sel::Profile { sketch: sketch.0, index }).collect();
                 }
             }
-            // Join and Cut show their stored target bodies so the picks can be edited.
+            // Join and Cut show their stored target bodies and features so the picks can be edited.
             if matches!(operation, Operation::Join | Operation::Cut) {
                 set_extrude_targets(&mut d.inputs, &mut d.active, &mut d.extra, op_index(operation));
                 if let Some(input) = d.inputs.iter_mut().find(|i| i.label == EXTRUDE_TARGETS) {
-                    input.items = targets.iter().map(|name| Sel::Body { name: name.0.clone() }).collect();
+                    input.items = body_and_feature_sels(targets, target_features);
                 }
-            } else if !targets.is_empty() {
-                d.extra.insert("targets".into(), json!(targets));
+            } else {
+                if !targets.is_empty() {
+                    d.extra.insert("targets".into(), json!(targets));
+                }
+                if !target_features.is_empty() {
+                    d.extra.insert("target_features".into(), json!(target_features));
+                }
             }
             d
         }
-        FeatureKind::Revolve { sketch, profiles, axis, angle, operation, targets, angle2, symmetric, convention, to } => {
+        FeatureKind::Revolve { sketch, profiles, axis, angle, operation, targets, target_features, angle2, symmetric, convention, to } => {
             let mut d = start("solid.revolve")?;
             let frame = feature_frame(s, f.component);
             let stored_axis = match axis {
@@ -8433,6 +8504,9 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
+            }
+            if !target_features.is_empty() {
+                d.extra.insert("target_features".into(), json!(target_features));
             }
             d
         }
@@ -8807,6 +8881,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             end_cut,
             operation,
             targets,
+            target_features,
         } => {
             let mut d = start("solid.coil")?;
             d.kind = Kind::Primitive {
@@ -8849,6 +8924,9 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
             }
+            if !target_features.is_empty() {
+                d.extra.insert("target_features".into(), json!(target_features));
+            }
             d
         }
         FeatureKind::Cone { base, axis, radius, top_radius, height, operation } => {
@@ -8868,14 +8946,15 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.extra.insert("axis".into(), pt3(axis.0));
             d
         }
-        FeatureKind::BoundaryFill { tools, cells, operation, remove_tools } => {
+        FeatureKind::BoundaryFill { tools, tool_features, cells, operation, remove_tools } => {
             let mut d = start("solid.boundary_fill")?;
             // The cells again, ticked where a stored cell point lies in the same cell.
             let before = s.model.state_before(f.id);
-            let found = fill_cells(&before, &solidcraft_engine::doc::plain(tools));
+            let items = body_and_feature_sels(tools, tool_features);
+            let resolved_names = resolve_sel_body_names(&s.doc, &before, &items);
+            let found = fill_cells(&before, &resolved_names);
             let filled: Vec<String> =
                 cells.iter().filter_map(|c| found.iter().min_by(|a, b| a.0.dist(c.0).total_cmp(&b.0.dist(c.0))).map(|x| x.1.clone())).collect();
-            let items: Vec<Sel> = tools.iter().map(|n| Sel::Body { name: n.to_string() }).collect();
             d.kind = Kind::BoundaryFill {
                 operation: op_index(operation),
                 cells: found.into_iter().map(|(p, l)| (p, l.clone(), filled.contains(&l))).collect(),
@@ -8889,14 +8968,14 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d
         }
-        FeatureKind::Combine { target, tools, operation, keep_tools } => {
+        FeatureKind::Combine { target, tools, tool_features, operation, keep_tools } => {
             let mut d = start("solid.combine")?;
             d.kind = Kind::Combine { operation: op_index(operation).max(1), keep_tools: *keep_tools };
             if let Some(inp) = d.inputs.get_mut(0) {
                 inp.items = vec![Sel::Body { name: target.to_string() }];
             }
             if let Some(inp) = d.inputs.get_mut(1) {
-                inp.items = tools.iter().map(|n| Sel::Body { name: n.to_string() }).collect();
+                inp.items = body_and_feature_sels(tools, tool_features);
             }
             d
         }
@@ -9051,7 +9130,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d
         }
-        FeatureKind::Loft { sections, operation, targets, rails, rail_fit } => {
+        FeatureKind::Loft { sections, operation, targets, target_features, rails, rail_fit } => {
             let mut d = start("solid.loft")?;
             d.kind = Kind::Loft { operation: op_index(operation), rail_fit: crate::dialogs_sweep::rail_fit_index(*rail_fit) };
             for (inp, items) in d.inputs.iter_mut().skip(1).zip(crate::dialogs_sweep::rail_sels(rails, s.active_sketch)) {
@@ -9072,6 +9151,9 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
             }
+            if !target_features.is_empty() {
+                d.extra.insert("target_features".into(), json!(target_features));
+            }
             d
         }
         FeatureKind::Sweep {
@@ -9083,6 +9165,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             path_edges,
             operation,
             targets,
+            target_features,
             orientation,
             twist,
             scale,
@@ -9119,6 +9202,9 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
+            }
+            if !target_features.is_empty() {
+                d.extra.insert("target_features".into(), json!(target_features));
             }
             d
         }
@@ -9338,11 +9424,11 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d
         }
-        FeatureKind::Scale { bodies, origin, .. } => {
+        FeatureKind::Scale { bodies, body_features, origin, .. } => {
             let mut d = start("solid.scale")?;
             d.kind = Kind::simple_restore(&f.kind)?;
             if let Some(inp) = d.inputs.first_mut() {
-                inp.items = bodies.iter().map(|n| Sel::Body { name: n.to_string() }).collect();
+                inp.items = body_and_feature_sels(bodies, body_features);
             }
             d.extra.insert("origin".into(), pt3(origin.0));
             d
@@ -9364,11 +9450,11 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.sync_thread(s);
             d
         }
-        FeatureKind::BoundingSolid { bodies, contents, .. } => {
+        FeatureKind::BoundingSolid { bodies, body_features, contents, .. } => {
             let mut d = start("solid.bounding_solid")?;
             d.kind = Kind::simple_restore(&f.kind)?;
             if let Some(inp) = d.inputs.first_mut() {
-                inp.items = bodies.iter().map(|n| Sel::Body { name: n.to_string() }).collect();
+                inp.items = body_and_feature_sels(bodies, body_features);
             }
             // A component's envelope stays one.
             if *contents {
@@ -9376,7 +9462,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d
         }
-        FeatureKind::Pipe { path_sketch, path, targets, .. } => {
+        FeatureKind::Pipe { path_sketch, path, targets, target_features, .. } => {
             let mut d = start("solid.pipe")?;
             d.kind = Kind::simple_restore(&f.kind)?;
             if let Some(inp) = d.inputs.first_mut() {
@@ -9385,9 +9471,12 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
             }
+            if !target_features.is_empty() {
+                d.extra.insert("target_features".into(), json!(target_features));
+            }
             d
         }
-        FeatureKind::Emboss { sketch, profiles, targets, face, .. } => {
+        FeatureKind::Emboss { sketch, profiles, targets, target_features, face, .. } => {
             let mut d = start("solid.emboss")?;
             d.kind = Kind::simple_restore(&f.kind)?;
             let items = st.sketch(sketch.0).map(|ss| profile_indices(ss, profiles)).unwrap_or_default();
@@ -9396,6 +9485,9 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
+            }
+            if !target_features.is_empty() {
+                d.extra.insert("target_features".into(), json!(target_features));
             }
             if let Some(face) = face
                 && let Some(input) = d.inputs.get_mut(1)
@@ -9443,26 +9535,35 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.extra.insert("heal".into(), json!(heal));
             d
         }
-        FeatureKind::Remove { bodies } => {
+        FeatureKind::Remove { bodies, body_features } => {
             let mut d = start("solid.remove")?;
             if let Some(inp) = d.inputs.first_mut() {
-                inp.items = bodies.iter().map(|n| Sel::Body { name: n.to_string() }).collect();
+                inp.items = body_and_feature_sels(bodies, body_features);
             }
             d
         }
-        kind @ FeatureKind::Move { bodies, copy_frames, .. } => {
+        kind @ FeatureKind::Move { bodies, body_features, copy_frames, .. } => {
             let mut d = start("solid.move")?;
             // Move stores distances in the first body's frame, which can differ from the
             // feature's component. Refill the world distances that the command accepts.
+            let st = s.model.state();
+            let first_body = bodies.first().map(|b| b.0.as_str()).or_else(|| {
+                body_features.iter().find_map(|fid| {
+                    if s.doc.feature(fid.0).is_some_and(|f| f.suppressed) {
+                        return None;
+                    }
+                    st.feature_body_names(fid.0).into_iter().next()
+                })
+            });
             let frame = copy_frames
                 .first()
                 .map(|m| solidcraft_engine::doc::mat_mul(&feature_frame(s, f.component), m))
                 .or_else(|| {
-                    bodies.first().and_then(|body| {
+                    first_body.and_then(|body| {
                         s.placed_document()
-                            .body_frames_with_source(&s.model.state())
+                            .body_frames_with_source(&st)
                             .into_iter()
-                            .find(|(world, own, ..)| world == &**body || own == &**body)
+                            .find(|(world, own, ..)| world == body || own == body)
                             .map(|(.., frame)| frame)
                     })
                 })

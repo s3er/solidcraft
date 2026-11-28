@@ -773,6 +773,7 @@ impl SavedModel {
                 threads: ids("threads", threads.len())?.into_iter().filter_map(|i| threads.get(i).cloned()).collect(),
                 sketch_keys,
                 blend_edges: serde_json::from_value(field("blend_edges")?).map_err(invalid)?,
+                feature_bodies: Default::default(),
                 fitted: serde_json::from_value(field("fitted")?).map_err(invalid)?,
                 tapered: serde_json::from_value(field("tapered")?).map_err(invalid)?,
                 // Older saved models have none: their patterns left no body out.

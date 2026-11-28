@@ -1624,7 +1624,7 @@ fn numbered_names(s: &Session, olds: &[String], name: &str) -> Vec<String> {
     // linear search per candidate would make the command cubic in the list.
     let mut taken: HashSet<&str> = st.bodies.iter().map(|b| b.name.as_str()).chain(olds.iter().map(String::as_str)).collect();
     for f in &s.doc.features {
-        if let FeatureKind::Remove { bodies } = &f.kind {
+        if let FeatureKind::Remove { bodies, .. } = &f.kind {
             taken.extend(bodies.iter().map(|b| b.0.as_str()));
         }
     }
@@ -1662,7 +1662,7 @@ fn rename_one(s: &mut Session, cmd: &str, given: &str, name: &str) -> Result<Bod
     // Remove keeps a name even after its body leaves the current state. Reusing it would
     // redirect that feature to this body on rebuild (#6042). Inactive removals must keep
     // their targets too, for when the history marker advances or they are unsuppressed.
-    if let Some(f) = s.doc.features.iter().find(|f| matches!(&f.kind, FeatureKind::Remove { bodies } if bodies.iter().any(|b| b == name))) {
+    if let Some(f) = s.doc.features.iter().find(|f| matches!(&f.kind, FeatureKind::Remove { bodies, .. } if bodies.iter().any(|b| b == name))) {
         return Err(bad(cmd, format!("`{name}` is still used by Remove feature `{}`; choose a different body name", f.name)));
     }
     // The body is the k-th new body of its feature; its siblings keep the names they have now

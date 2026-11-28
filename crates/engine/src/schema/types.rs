@@ -465,6 +465,41 @@ impl JsonSchema for StringList {
     }
 }
 
+/// One upstream feature reference (id or name) or a list of them, at most 10 000.
+/// `MIN_ONE` requires at least one entry when the key is given.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FeatureRefList<const MIN_ONE: bool = false>(pub Vec<Value>);
+
+impl<'de, const MIN_ONE: bool> Deserialize<'de> for FeatureRefList<MIN_ONE> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let is_ref = |v: &Value| v.as_u64().is_some() || v.is_string();
+        let fail = || D::Error::custom("must be a feature id/name or a list of feature ids or names");
+        match Value::deserialize(d)? {
+            v if is_ref(&v) => Ok(FeatureRefList(vec![v])),
+            Value::Array(a) if a.len() > 10_000 => Err(D::Error::custom("must have at most 10000 items")),
+            Value::Array(a) if MIN_ONE && a.is_empty() => Err(D::Error::custom("must list at least one feature")),
+            Value::Array(a) if a.iter().all(is_ref) => Ok(FeatureRefList(a)),
+            _ => Err(fail()),
+        }
+    }
+}
+
+impl<const MIN_ONE: bool> JsonSchema for FeatureRefList<MIN_ONE> {
+    fn schema_name() -> Cow<'static, str> {
+        if MIN_ONE { "FeatureRefListNonEmpty" } else { "FeatureRefList" }.into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let item = json!({"description": "A feature by id (a whole number) or by name.", "type": ["integer", "string"], "minimum": 0});
+        json_schema!({
+            "description": "Upstream feature(s), by id or name, whose live created bodies are dynamically selected.",
+            "anyOf": [
+                item,
+                {"type": "array", "items": item, "minItems": usize::from(MIN_ONE), "maxItems": 10000}
+            ]
+        })
+    }
+}
+
 /// A sweep's path (#16168): curve ids of the path's sketch, or `{"sketch", "curve"}` entries for
 /// curves of other sketches. Accepted exactly when the handler reads it; kept as the raw values.
 #[derive(Clone, Debug, Default, PartialEq)]

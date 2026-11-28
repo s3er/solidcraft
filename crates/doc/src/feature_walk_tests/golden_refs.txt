@@ -10,15 +10,15 @@ sketch
 sketch_along_path
 extrude
   sketches: [1]
-  remap_refs: sketch
+  remap_refs: sketch, target_features[0]
   remap_bodies: targets[0]
 extrude_thin
   sketches: [1]
-  remap_refs: sketch
+  remap_refs: sketch, target_features[0]
   remap_bodies: targets[0]
 revolve
   sketches: [1]
-  remap_refs: sketch
+  remap_refs: sketch, target_features[0]
   remap_bodies: targets[0]
 fillet_constant
   remap_bodies: body
@@ -39,6 +39,7 @@ sphere
 torus
 cone
 combine
+  remap_refs: tool_features[0]
   remap_bodies: target, tools[0]
 pattern_rectangular
   remap_refs: features[0]
@@ -69,15 +70,15 @@ hole_references
 thread
 loft
   sketches: [4, 5, 6]
-  remap_refs: rails[0].sketch, sections[0].sketch, sections[1].sketch
+  remap_refs: rails[0].sketch, sections[0].sketch, sections[1].sketch, target_features[0]
   remap_bodies: targets[0]
 sweep
   sketches: [1, 2]
-  remap_refs: path_sketch, sketch
+  remap_refs: path_sketch, sketch, target_features[0]
   remap_bodies: targets[0]
 sweep_options
   sketches: [1, 2]
-  remap_refs: path_sketch, sketch
+  remap_refs: path_sketch, sketch, target_features[0]
   remap_bodies: targets[0]
 shell
   remap_bodies: body
@@ -104,16 +105,18 @@ split_face
   remap_refs: plane.base.base.feature, sketch
   remap_bodies: body, tool.body
 scale
+  remap_refs: body_features[0]
   remap_bodies: bodies[0]
 offset_face
   remap_bodies: body
 delete_face
   remap_bodies: body
 bounding_solid
+  remap_refs: body_features[0]
   remap_bodies: bodies[0]
 pipe
   sketches: [1]
-  remap_refs: path_sketch
+  remap_refs: path_sketch, target_features[0]
   remap_bodies: targets[0]
 frame_member
   sketches: [1]
@@ -125,7 +128,7 @@ frame_plate
   remap_refs: member.feature, plane.base.base.feature
 emboss
   sketches: [1]
-  remap_refs: sketch
+  remap_refs: sketch, target_features[0]
   remap_bodies: face.body, targets[0]
 rib
   sketches: [1]
@@ -134,15 +137,17 @@ replace_face
   remap_refs: target.base.base.feature
   remap_bodies: body
 align
+  remap_refs: body_features[0]
   remap_bodies: bodies[0]
 coil
+  remap_refs: target_features[0]
   remap_bodies: targets[0]
 coil_profile
   sketches: [1]
   remap_refs: sketch
 cell_grid
   sketches: [1]
-  remap_refs: sketch
+  remap_refs: sketch, target_features[0]
   remap_bodies: targets[0]
 sheet_base
   sketches: [1]
@@ -187,16 +192,20 @@ snap_fit
 rest
   remap_bodies: body
 boundary_fill
+  remap_refs: tool_features[0]
   remap_bodies: tools[0]
 remove
+  remap_refs: body_features[0]
   remap_bodies: bodies[0]
 patch
   sketches: [8]
   remap_refs: sketch
   remap_bodies: body
 stitch
+  remap_refs: body_features[0]
   remap_bodies: bodies[0]
 thicken
+  remap_refs: body_features[0], target_features[0]
   remap_bodies: bodies[0], targets[0]
 surface_extrude
   sketches: [1]
@@ -256,6 +265,7 @@ surface_trim_mutual
   remap_refs: plane.base.base.feature
   remap_bodies: body, with
 move
+  remap_refs: body_features[0]
   remap_bodies: bodies[0]
 import
 mesh_convert

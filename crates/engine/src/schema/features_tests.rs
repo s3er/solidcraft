@@ -22,6 +22,7 @@ fn schemas_and_the_key_check_agree() {
             "angle",
             "axis",
             "bodies",
+            "body_features",
             "body_name",
             "body_names",
             "copy",
@@ -65,6 +66,7 @@ fn schemas_and_the_key_check_agree() {
             "start_offset",
             "symmetric_offset",
             "taper",
+            "target_features",
             "targets",
             "thickness",
             "thickness2",
@@ -96,6 +98,7 @@ fn schemas_and_the_key_check_agree() {
             "profiles",
             "sketch",
             "symmetric",
+            "target_features",
             "targets",
             "to",
             "touching",
@@ -133,13 +136,13 @@ fn schemas_and_the_key_check_agree() {
     );
     assert_keys(
         input_schema_for::<PipeParams>(),
-        &["body_name", "body_names", "diameter", "name", "operation", "participants", "path", "path_sketch", "targets", "wall"],
+        &["body_name", "body_names", "diameter", "name", "operation", "participants", "path", "path_sketch", "target_features", "targets", "wall"],
     );
     assert_keys(
         input_schema_for::<BoundingSolidParams>(),
-        &["bodies", "body_name", "body_names", "component", "margin", "margins", "name", "participants"],
+        &["bodies", "body_features", "body_name", "body_names", "component", "margin", "margins", "name", "participants"],
     );
-    assert_keys(input_schema_for::<ScaleParams>(), &["bodies", "factor", "factors", "name", "origin", "participants"]);
+    assert_keys(input_schema_for::<ScaleParams>(), &["bodies", "body_features", "factor", "factors", "name", "origin", "participants"]);
     assert_keys(input_schema_for::<OffsetPlaneParams>(), &["base", "name", "offset", "participants", "through"]);
     assert_keys(input_schema_for::<PlaneAtAngleParams>(), &["angle", "axis", "base", "direction_only", "name", "participants", "pivot"]);
     assert_keys(
@@ -191,6 +194,7 @@ fn combine_schema_and_the_key_check_agree() {
             "operation",
             "participants",
             "target",
+            "tool_features",
             "tools",
             "touching",
         ],
@@ -435,6 +439,7 @@ fn sweep_schemas_and_the_key_check_agree() {
         "path_sketch",
         "profiles",
         "sketch",
+        "target_features",
         "targets",
         "touching",
     ];

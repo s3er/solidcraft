@@ -915,7 +915,7 @@ pub fn compute(s: &Session, cmds: &[(String, Value)], colors: Colors) -> Job {
             let p = s.preview(cmds).map_err(|e| e.to_string())?;
             let guard =
                 |f: &dyn Fn() -> Built| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| "the preview failed".to_string());
-            let combine = combine_of(cmds);
+            let combine = combine_of(s, &p.before, cmds);
             let mut b = guard(&|| build_as(&p.before, &p.after, colors, combine.as_ref()))?;
             b.bounds = state_bounds(&p.after);
             // The radius a previewed fillet used when it reduced the one asked for (a new
@@ -1208,17 +1208,41 @@ struct Combine {
 }
 
 /// The combine the commands make or redefine, if they do.
-fn combine_of(cmds: &[(String, Value)]) -> Option<Combine> {
+fn combine_of(s: &Session, before: &ModelState, cmds: &[(String, Value)]) -> Option<Combine> {
     cmds.iter().find_map(|(command, p)| {
         let p = match command.as_str() {
             "solid.combine" => p,
             "timeline.redefine" if p.get("command").and_then(Value::as_str) == Some("solid.combine") => p.get("params")?,
             _ => return None,
         };
+        let mut tools = solidcraft_engine::params::string_list_or_default(p, "tools");
+        if let Some(feats) = p.get("tool_features") {
+            let refs: Vec<&Value> = match feats {
+                Value::Array(a) => a.iter().collect(),
+                one @ (Value::Number(_) | Value::String(_)) => vec![one],
+                _ => Vec::new(),
+            };
+            for r in refs {
+                let fid = match r {
+                    Value::Number(n) => n.as_u64(),
+                    Value::String(name) => s.doc.find_feature(name).map(|f| f.id),
+                    _ => None,
+                };
+                if let Some(fid) = fid
+                    && s.doc.feature(fid).is_some_and(|f| !f.suppressed)
+                {
+                    for name in before.feature_body_names(fid) {
+                        if !tools.iter().any(|s| s == name) {
+                            tools.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
         Some(Combine {
             op: p.get("operation").and_then(Value::as_str).unwrap_or("join").to_string(),
             target: p.get("target").and_then(Value::as_str)?.to_string(),
-            tools: solidcraft_engine::params::string_list_or_default(p, "tools"),
+            tools,
         })
     })
 }

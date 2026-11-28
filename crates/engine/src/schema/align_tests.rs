@@ -44,6 +44,7 @@ fn schemas_and_the_key_check_agree() {
             "angle",
             "axes",
             "bodies",
+            "body_features",
             "body_name",
             "body_names",
             "flip",
@@ -60,7 +61,11 @@ fn schemas_and_the_key_check_agree() {
         ],
     );
     let schema = input_schema_for::<AlignParams>();
-    assert_eq!(schema.as_value()["required"], json!(["bodies"]));
+    assert!(
+        schema.as_value()["allOf"]
+            .as_array()
+            .is_some_and(|all| all.contains(&json!({"anyOf": [{"required": ["bodies"]}, {"required": ["body_features"]}]})))
+    );
 }
 
 /// Calls that fail today get the same message in strict, on a design with the bodies, a sketch

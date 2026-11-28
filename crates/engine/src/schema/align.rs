@@ -31,7 +31,6 @@ use serde_json::{Map, Value, json};
 use super::check::whole;
 use super::config::NameList;
 use super::joints::JointOriginArg;
-use super::motion::require;
 use super::types::{AngleExpr, FeatureCommon, PlaneParam, Point3, SketchRef, StringList, feature_common};
 use crate::cmd::{MAX_SKETCH_ID, SidePoint, SketchFrameId, axes_mask, sketch_frame_id, sketch_key};
 use crate::params::{self, MAX_STRING_LIST};
@@ -137,12 +136,15 @@ impl JsonSchema for AxesSchema {
     }
 }
 
-/// `bodies` is required, and so is one key for each side.
+/// `bodies` or `body_features` is required, and so is one key for each side.
 fn align_schema(schema: &mut Schema) {
-    require(schema, "bodies");
     // Each side needs one of its four keys; the handler says which, in its own words.
-    let side = |keys: [&str; 4]| json!({"anyOf": keys.iter().map(|k| json!({"required": [k]})).collect::<Vec<_>>()});
-    let sides = [side(["from", "from_face", "from_plane", "from_frame"]), side(["to", "to_face", "to_plane", "to_frame"])];
+    let side = |keys: &[&str]| json!({"anyOf": keys.iter().map(|k| json!({"required": [k]})).collect::<Vec<_>>()});
+    let sides = [
+        side(&["bodies", "body_features"]),
+        side(&["from", "from_face", "from_plane", "from_frame"]),
+        side(&["to", "to_face", "to_plane", "to_frame"]),
+    ];
     match schema.get_mut("allOf") {
         Some(Value::Array(all)) => all.extend(sides),
         _ => {
@@ -168,6 +170,9 @@ pub struct AlignParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "bodies_schema")]
     pub bodies: Option<NameList>,
+    /// Upstream features whose live created bodies are aligned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_features: Option<super::types::FeatureRefList<true>>,
     /// Where the move starts, on the bodies. Not read when `from_face` is a point; not with
     /// `from_plane` or `from_frame` (the handler refuses both).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,7 +308,14 @@ impl<'de> Deserialize<'de> for AlignParams {
         let fail = D::Error::custom;
         // In the handler's order: the bodies, the planes, the frames, the two sides' points, the
         // angle and the axes; then `add_feature`'s keys.
-        let bodies = bodies(&m).map_err(fail)?;
+        let body_features = match m.get("body_features") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(super::types::FeatureRefList::<true>::deserialize(v).map_err(|e| fail(whole(format!("`body_features` {e}"))))?),
+        };
+        let bodies = match (m.get("bodies"), &body_features) {
+            (None, Some(_)) => None,
+            _ => Some(bodies(&m).map_err(fail)?),
+        };
         let (from_plane, to_plane) = (plane(&m, "from_plane").map_err(fail)?, plane(&m, "to_plane").map_err(fail)?);
         let (from_frame, to_frame) = (frame(&m, "from").map_err(fail)?, frame(&m, "to").map_err(fail)?);
         let (from, from_face) = side(&m, "from", from_plane.is_some() || from_frame.is_some()).map_err(fail)?;
@@ -335,7 +347,7 @@ impl<'de> Deserialize<'de> for AlignParams {
         let mut common = feature_common::<_, FeatureCommon>(Value::Object(m)).map_err(|e| fail(e.to_string()))?;
         let (body_names, participants) = (lists.pop().filter(|l| !l.0.is_empty()), lists.pop().filter(|l| !l.0.is_empty()));
         (common.body_names, common.participants) = (body_names, participants);
-        Ok(AlignParams { bodies: Some(bodies), from, from_face, from_plane, from_frame, to, to_face, to_plane, to_frame, flip, axes, angle, common })
+        Ok(AlignParams { bodies, body_features, from, from_face, from_plane, from_frame, to, to_face, to_plane, to_frame, flip, axes, angle, common })
     }
 }
 

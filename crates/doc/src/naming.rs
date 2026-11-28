@@ -557,11 +557,11 @@ pub(crate) fn rigid_predecessor(b: &ModelBody) -> Option<&ModelBody> {
     use solidcraft_kernel::history::{EdgeOrigin, FaceOrigin};
 
     let origin = b.names.origin.as_ref()?;
-    let bodies = match &origin.feature.kind {
-        FeatureKind::Move { bodies, copy: false, .. } | FeatureKind::Align { bodies, .. } => bodies,
+    let (bodies, body_features) = match &origin.feature.kind {
+        FeatureKind::Move { bodies, body_features, copy: false, .. } | FeatureKind::Align { bodies, body_features, .. } => (bodies, body_features),
         _ => return None,
     };
-    if !bodies.iter().any(|name| *name == b.name) {
+    if !bodies.iter().any(|name| *name == b.name) && !body_features.iter().any(|id| origin.before.feature_has_body(id.0, &b.name)) {
         return None;
     }
     let lineage = b.names.lineage.as_ref()?;

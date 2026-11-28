@@ -26,6 +26,7 @@ fn boundary_fill_classifies_cells_on_exact_surfaces() {
         .add_feature(
             FeatureKind::BoundaryFill {
                 tools: vec![BodyName(tool)],
+                tool_features: Vec::new(),
                 cells: vec![Position(Vec3::new(0.0, 0.0, 5.0))],
                 operation: Operation::NewBody,
                 remove_tools: true,
@@ -99,6 +100,7 @@ fn plate_doc() -> (Document, u64) {
     doc.add_feature(
         FeatureKind::Extrude {
             thin: None,
+            target_features: Vec::new(),
             sketch: crate::SketchId(s),
             profiles: ProfileSel::All,
             extent: Extent {
@@ -209,6 +211,7 @@ fn an_outline_closed_by_point_on_curve_tangent_joints_extrudes() {
     doc.add_feature(
         FeatureKind::Extrude {
             thin: None,
+            target_features: Vec::new(),
             sketch: crate::SketchId(s),
             profiles: ProfileSel::All,
             extent: Extent {
@@ -928,6 +931,7 @@ fn a_coil_follows_its_sketch() {
             end_cut: Default::default(),
             operation: Operation::NewBody,
             targets: Vec::new(),
+            target_features: Vec::new(),
         },
         None,
     )
@@ -971,6 +975,7 @@ fn box_fillet_cut_timeline() {
     doc.add_feature(
         FeatureKind::Extrude {
             thin: None,
+            target_features: Vec::new(),
             sketch: crate::SketchId(s2),
             profiles: ProfileSel::Points { points: vec![Vec2::new(20.0, 15.0)] },
             extent: Extent {
@@ -1023,6 +1028,7 @@ fn errors_are_reported_not_fatal() {
             angle: "90 deg".into(),
             operation: Operation::NewBody,
             targets: vec![],
+            target_features: Vec::new(),
             angle2: None,
             symmetric: false,
             convention: Default::default(),
@@ -1154,8 +1160,17 @@ fn primitives_and_combine() {
         None,
     )
     .unwrap();
-    doc.add_feature(FeatureKind::Combine { target: "Body1".into(), tools: vec!["Body2".into()], operation: Operation::Cut, keep_tools: false }, None)
-        .unwrap();
+    doc.add_feature(
+        FeatureKind::Combine {
+            target: "Body1".into(),
+            tools: vec!["Body2".into()],
+            tool_features: Vec::new(),
+            operation: Operation::Cut,
+            keep_tools: false,
+        },
+        None,
+    )
+    .unwrap();
     let mut m = Model::new();
     m.evaluate(&doc);
     assert!(m.results.iter().all(|r| r.error.is_none()), "{:?}", m.results);
@@ -1763,6 +1778,7 @@ fn a_combine_leaves_out_a_tool_whose_feature_is_suppressed() {
             FeatureKind::Combine {
                 target: "Body1".into(),
                 tools: vec!["Body2".into(), "Body3".into()],
+                tool_features: Vec::new(),
                 operation: Operation::Join,
                 keep_tools: false,
             },
@@ -1821,6 +1837,7 @@ fn a_split_of_a_body_of_two_pieces_gives_the_halves_of_both() {
     doc.add_feature(
         FeatureKind::Extrude {
             thin: None,
+            target_features: Vec::new(),
             sketch: crate::SketchId(s),
             profiles: ProfileSel::All,
             extent: Extent {
@@ -1849,7 +1866,13 @@ fn a_split_of_a_body_of_two_pieces_gives_the_halves_of_both() {
     )
     .unwrap();
     doc.add_feature(
-        FeatureKind::Combine { target: "Body1".into(), tools: vec!["Body2".into()], operation: Operation::Join, keep_tools: false },
+        FeatureKind::Combine {
+            target: "Body1".into(),
+            tools: vec!["Body2".into()],
+            tool_features: Vec::new(),
+            operation: Operation::Join,
+            keep_tools: false,
+        },
         None,
     )
     .unwrap();
@@ -1898,6 +1921,7 @@ fn a_join_splits_off_only_what_touches_along_an_edge() {
             FeatureKind::Combine {
                 target: "Body1".into(),
                 tools: vec!["Body3".into(), "Body2".into()],
+                tool_features: Vec::new(),
                 operation: Operation::Join,
                 keep_tools: false,
             },
@@ -2277,6 +2301,7 @@ fn feature_kind_key_and_type_name_mappings() {
 fn an_extruded_ellipse_or_spline_is_one_wall_named_by_its_curve() {
     let extrude = |sketch: u64| FeatureKind::Extrude {
         thin: None,
+        target_features: Vec::new(),
         sketch: crate::SketchId(sketch),
         profiles: ProfileSel::All,
         extent: Extent {

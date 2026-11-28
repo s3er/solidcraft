@@ -911,6 +911,9 @@ pub enum FeatureKind {
         /// Target body names for join/cut/intersect (empty = all bodies).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        /// Target features whose live created bodies take part in join/cut/intersect.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
         /// Thin: a wall along sketch curves instead of the profiles (which are then unused).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thin: Option<ThinWall>,
@@ -926,6 +929,8 @@ pub enum FeatureKind {
         operation: Operation,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
         /// Two Sides: the angle on the other side.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[walk(angle = "Angle 2")]
@@ -1077,6 +1082,9 @@ pub enum FeatureKind {
     Combine {
         target: BodyName,
         tools: Vec<BodyName>,
+        /// Features whose live created bodies are dynamically resolved as tool bodies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_features: Vec<FeatureId>,
         operation: Operation,
         #[serde(default)]
         keep_tools: bool,
@@ -1257,6 +1265,8 @@ pub enum FeatureKind {
         operation: Operation,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
         /// Guide rails (one or two) the loft follows between its sections.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rails: Vec<SweepRail>,
@@ -1300,6 +1310,8 @@ pub enum FeatureKind {
         operation: Operation,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
     },
     /// Hollow a body leaving walls of `thickness`, removing the faces at the given points.
     Shell {
@@ -1386,6 +1398,8 @@ pub enum FeatureKind {
     /// Scale bodies about a point (uniform, or per axis).
     Scale {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
         #[serde(default)]
         origin: Position,
         #[walk(unitless = "Scale factor")]
@@ -1418,6 +1432,8 @@ pub enum FeatureKind {
     /// A box around bodies, grown by a margin.
     BoundingSolid {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
         /// Bound every body placed inside the feature's own component instead of `bodies`: its
         /// subcomponents' at any depth and each of their placements, where they stand in its
         /// frame. The box is that component's envelope: it moves with the component, and stands
@@ -1446,6 +1462,8 @@ pub enum FeatureKind {
         operation: Operation,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
     },
     /// Plates closing open ends of frame members (#4003), one body per end, each the outside of
     /// the member's profile, optionally set in from its edge.
@@ -1576,6 +1594,8 @@ pub enum FeatureKind {
         face: Option<EmbossFace>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
     },
     /// A thin wall from open sketch curves: `thickness` across the sketch plane, filling from
     /// the curves toward the body (to the next face, or `depth`), or with `normal` along the
@@ -1615,6 +1635,8 @@ pub enum FeatureKind {
     /// Move bodies so that `from` lands on `to` (and, with normals, the faces meet face to face).
     Align {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
         from: Position,
         to: Position,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1716,6 +1738,8 @@ pub enum FeatureKind {
         /// Target body names (empty = the feature's participants, else all bodies of its component).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
     },
     /// A helical coil: a circular or square section swept `turns` times about `axis`, rising
     /// `pitch` per turn, on a helix of `diameter` (the section's centre, or its inside or outside).
@@ -1762,6 +1786,8 @@ pub enum FeatureKind {
         operation: Operation,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
     },
     /// Sheet metal base flange: a sheet from a closed profile (thickness from the rule).
     SheetBase {
@@ -2122,6 +2148,8 @@ pub enum FeatureKind {
     /// tools and outside the rest), each picked by a point inside it.
     BoundaryFill {
         tools: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_features: Vec<FeatureId>,
         cells: Vec<Position>,
         #[serde(default)]
         operation: Operation,
@@ -2132,6 +2160,8 @@ pub enum FeatureKind {
     /// Remove bodies from the model (from here on in the timeline).
     Remove {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
     },
     /// Surface bodies: planar patches filling sketch regions (`profiles` of `sketch`), or a
     /// closed loop of a body's edges (`edges`: points on them, on `body`).
@@ -2164,6 +2194,8 @@ pub enum FeatureKind {
     /// Surface bodies sewn along shared edges into the first one (a solid when they close).
     Stitch {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
         #[serde(default = "zero_expr")]
         #[walk(length = "Tolerance")]
         tolerance: Expr,
@@ -2172,6 +2204,8 @@ pub enum FeatureKind {
     /// `symmetric`).
     Thicken {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
         #[walk(length = "Thickness")]
         thickness: Expr,
         #[serde(default)]
@@ -2179,6 +2213,8 @@ pub enum FeatureKind {
         operation: Operation,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_features: Vec<FeatureId>,
     },
     /// A surface body swept straight along the sketch normal from open curve chains and the
     /// boundaries of profiles: walls only, no caps.
@@ -2472,6 +2508,8 @@ pub enum FeatureKind {
     },
     Move {
         bodies: Vec<BodyName>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        body_features: Vec<FeatureId>,
         #[walk(length = ["X distance", "Y distance", "Z distance"])]
         translate: [Expr; 3],
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3708,6 +3746,47 @@ impl FeatureKind {
             FeatureKind::MeshImport { .. } => "Mesh",
             FeatureKind::MeshConvert { .. } => "ConvertMesh",
             FeatureKind::Repair { .. } => "Repair",
+        }
+    }
+
+    /// Whether this feature resolves any of its body/tool/target inputs dynamically from earlier
+    /// features (`body_features`, `tool_features` or `target_features`).
+    pub fn has_feature_body_inputs(&self) -> bool {
+        match self {
+            FeatureKind::Combine { tool_features, .. } | FeatureKind::BoundaryFill { tool_features, .. } => !tool_features.is_empty(),
+            FeatureKind::Move { body_features, .. }
+            | FeatureKind::Scale { body_features, .. }
+            | FeatureKind::Remove { body_features, .. }
+            | FeatureKind::Align { body_features, .. }
+            | FeatureKind::BoundingSolid { body_features, .. }
+            | FeatureKind::Stitch { body_features, .. } => !body_features.is_empty(),
+            FeatureKind::Thicken { body_features, target_features, .. } => !body_features.is_empty() || !target_features.is_empty(),
+            FeatureKind::Extrude { target_features, .. }
+            | FeatureKind::Revolve { target_features, .. }
+            | FeatureKind::Loft { target_features, .. }
+            | FeatureKind::Sweep { target_features, .. }
+            | FeatureKind::Pipe { target_features, .. }
+            | FeatureKind::Emboss { target_features, .. }
+            | FeatureKind::Coil { target_features, .. }
+            | FeatureKind::CellGrid { target_features, .. } => !target_features.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Upstream features whose live created bodies are dynamically targeted by this feature's
+    /// boolean operation, if it has a `target_features` list.
+    pub fn target_features(&self) -> &[FeatureId] {
+        match self {
+            FeatureKind::Extrude { target_features, .. }
+            | FeatureKind::Revolve { target_features, .. }
+            | FeatureKind::Loft { target_features, .. }
+            | FeatureKind::Sweep { target_features, .. }
+            | FeatureKind::Pipe { target_features, .. }
+            | FeatureKind::Emboss { target_features, .. }
+            | FeatureKind::Coil { target_features, .. }
+            | FeatureKind::CellGrid { target_features, .. }
+            | FeatureKind::Thicken { target_features, .. } => target_features,
+            _ => &[],
         }
     }
 }

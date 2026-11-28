@@ -29,11 +29,11 @@ crate::dialog_descriptor::dialog_descriptors! {
             distance: String = "2 mm".into() => distance.to_string(),
             chain: bool = false => *chain,
         } => json!({"distance": distance});
-        Stitch("surface.stitch", "STITCH", [("Surfaces", BODIES, true)],
+        Stitch("surface.stitch", "STITCH", [("Surfaces", crate::selection::BODY_OR_FEATURE, true)],
             FeatureKind::Stitch { tolerance, .. }) {
             tolerance: String = String::new() => if tolerance.trim() == "0" { String::new() } else { tolerance.to_string() },
         } => json!({});
-        Thicken("surface.thicken", "THICKEN", [("Surfaces", BODIES, true)],
+        Thicken("surface.thicken", "THICKEN", [("Surfaces", crate::selection::BODY_OR_FEATURE, true)],
             FeatureKind::Thicken { thickness, symmetric, operation, .. }) {
             thickness: String = "2 mm".into() => thickness.to_string(),
             symmetric: bool = false => *symmetric,
@@ -818,13 +818,16 @@ pub fn commands(app: &SolveApp, k: &Surf, inputs: &[SelInput], extra: &Map<Strin
         }
         Surf::Stitch { tolerance } => {
             need(0, "the surfaces to stitch")?;
-            let mut p = json!({ "bodies": items(inputs, 0).body_names() });
+            let mut p = json!({});
+            crate::dialogs::put_bodies_and_features(&mut p, items(inputs, 0), "bodies", "body_features", None);
             put(&mut p, &[("tolerance", tolerance)]);
             ("surface.stitch", p)
         }
         Surf::Thicken { .. } => {
             need(0, "the surfaces to thicken")?;
-            ("surface.thicken", json!({"bodies": items(inputs, 0).body_names()}))
+            let mut p = json!({});
+            crate::dialogs::put_bodies_and_features(&mut p, items(inputs, 0), "bodies", "body_features", None);
+            ("surface.thicken", p)
         }
         Surf::Extend { .. } => {
             need(0, "the edges to extend")?;
@@ -1187,9 +1190,14 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind, frame: &Mat) -> Option<(K
             };
             (if matches!(kind, FeatureKind::Unstitch { .. }) { Surf::Unstitch } else { Surf::ReverseNormal }, vec![sels])
         }
-        FeatureKind::Stitch { bodies, .. } => (Surf::simple_restore(kind)?, vec![bodies.iter().map(|n| Sel::Body { name: n.to_string() }).collect()]),
-        FeatureKind::Thicken { bodies, .. } => {
-            (Surf::simple_restore(kind)?, vec![bodies.iter().map(|n| Sel::Body { name: n.to_string() }).collect()])
+        FeatureKind::Stitch { bodies, body_features, .. } => {
+            (Surf::simple_restore(kind)?, vec![crate::dialogs::body_and_feature_sels(bodies, body_features)])
+        }
+        FeatureKind::Thicken { bodies, body_features, target_features, .. } => {
+            if !target_features.is_empty() {
+                kept.insert("target_features".into(), json!(target_features.iter().map(|id| id.0).collect::<Vec<_>>()));
+            }
+            (Surf::simple_restore(kind)?, vec![crate::dialogs::body_and_feature_sels(bodies, body_features)])
         }
         FeatureKind::SurfaceExtend { edges, mode, up_to, neighbours, .. } => {
             // The dialog edits the edges and the distance; the rest is kept as it was.

@@ -9545,8 +9545,8 @@ fn box_select(app: &mut SolveApp, proj: &Proj, bx: BoxSel, add: bool) {
         let accept = dialog_accept.unwrap_or(if has_body { BODIES } else { BODIES | PROFILES });
         // Bulk body selection follows the active component, just like its unfaded bodies.
         // Keep other dialogs and Move's reference inputs free to pick across components.
-        let scoped_bodies =
-            dialog_accept.unwrap_or(BODIES) == BODIES && app.dialog.as_ref().is_none_or(|d| matches!(d.kind, crate::dialogs::Kind::Move { .. }));
+        let scoped_bodies = matches!(dialog_accept, None | Some(BODIES) | Some(crate::selection::BODY_OR_FEATURE))
+            && app.dialog.as_ref().is_none_or(|d| matches!(d.kind, crate::dialogs::Kind::Move { .. }));
         let active_bodies = if scoped_bodies { active_body_names(app) } else { None };
         let measuring = measuring_mesh_edges(app);
         for b in &st.bodies {

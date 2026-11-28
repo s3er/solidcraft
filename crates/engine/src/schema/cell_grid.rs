@@ -127,6 +127,9 @@ pub struct CellGridParams {
     /// The bodies to cut, or to join the raised cells to. Default: the bodies of the active component (or `participants`).
     #[serde(default)]
     pub targets: Option<StringList>,
+    /// Upstream features whose live created bodies are cut or joined.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }

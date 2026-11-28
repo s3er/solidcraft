@@ -47,7 +47,7 @@ pub fn kind(mode: usize, doc: &solidcraft_engine::doc::Document) -> Kind {
 
 /// The selection inputs of a move type (what moves first: bodies or components, see [`object`]).
 pub fn inputs(mode: usize) -> Vec<SelInput> {
-    let mut v = vec![SelInput::new("Selection", BODIES, true)];
+    let mut v = vec![SelInput::new("Selection", crate::selection::BODY_OR_FEATURE, true)];
     match mode {
         FREE => v.push(SelInput::new("Pivot", POINTS, false)),
         ROTATE => v.push(SelInput::new("Axis", AXIS_PICKS, false)),
@@ -130,7 +130,7 @@ fn one_kind(app: &SolveApp, d: &mut Dialog) {
     let unset = !d.extra.contains_key("object");
     let picks = items(d, 0);
     let components = picks.iter().any(|s| matches!(s, Sel::Occurrence { .. }));
-    let bodies = picks.iter().any(|s| matches!(s, Sel::Body { .. }));
+    let bodies = picks.iter().any(|s| matches!(s, Sel::Body { .. } | Sel::Feature { .. }));
     match (components, bodies) {
         (true, false) => set_object(d, OBJECT_COMPONENTS),
         (false, true) => set_object(d, OBJECT_BODIES),
@@ -186,6 +186,7 @@ pub(crate) fn admit(s: &solidcraft_engine::Session, d: &mut Dialog, sel: Sel) ->
             Some(Sel::Occurrence { path })
         }
         Sel::Body { name } if components => crate::dialogs::occurrence_path_of_body(s, &name).map(|path| Sel::Occurrence { path }),
+        Sel::Feature { .. } if components => None,
         other => Some(other),
     }
 }
@@ -232,6 +233,13 @@ fn to_bodies(app: &SolveApp, d: &mut Dialog) {
     let Some(input) = d.inputs.first_mut() else { return };
     let mut out: Vec<Sel> = Vec::new();
     for s in &input.items {
+        if let Sel::Feature { id } = s {
+            let feat = Sel::Feature { id: *id };
+            if !out.contains(&feat) {
+                out.push(feat);
+            }
+            continue;
+        }
         let names = match s {
             Sel::Body { name } => vec![name.clone()],
             Sel::Occurrence { path } => app.session.occurrence_bodies(path, true).unwrap_or_default(),
@@ -329,9 +337,13 @@ fn on_moved(moved: &[String], s: &Sel) -> bool {
 /// (the bodies its placement shows, as a Browser row lists them).
 fn bodies_of(app: &SolveApp, d: &Dialog) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let st = crate::open_meshing::session_world(&app.session);
     for sel in items(d, 0) {
         let names = match sel {
             Sel::Body { name } => vec![name.clone()],
+            Sel::Feature { id } if app.session.doc.feature(*id).is_some_and(|f| !f.suppressed) => {
+                st.feature_body_names(*id).into_iter().map(str::to_string).collect()
+            }
             Sel::Occurrence { path } => app.session.occurrence_bodies(path, true).unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -598,11 +610,15 @@ fn targets(app: &SolveApp, d: &Dialog) -> (Vec<String>, Vec<Vec<u64>>) {
     (items(d, 0).body_names(), components)
 }
 
-/// The solid.move parameters that name what the move moves (`bodies`, and `occurrences` when
-/// there are components to copy).
+/// The solid.move parameters that name what the move moves (`bodies`, `body_features`, and
+/// `occurrences` when there are components to copy).
 fn targets_json(app: &SolveApp, d: &Dialog) -> Value {
     let (bodies, components) = targets(app, d);
+    let body_features = crate::dialogs::sel_feature_ids(items(d, 0));
     let mut p = json!({ "bodies": bodies });
+    if !body_features.is_empty() {
+        p["body_features"] = json!(body_features);
+    }
     if !components.is_empty() {
         p["occurrences"] = json!(components);
     }
@@ -873,7 +889,7 @@ fn with_transform(mut p: Value, m: &Mat) -> Value {
 fn step(app: &SolveApp, d: &Dialog) -> Result<Step, String> {
     let Kind::Move { mode, x, y, z, rx, ry, rz, angle } = &d.kind else { return Err("not a move".into()) };
     let (bodies, components) = targets(app, d);
-    if bodies.is_empty() && components.is_empty() && placements(d).is_empty() {
+    if bodies.is_empty() && components.is_empty() && placements(d).is_empty() && crate::dialogs::sel_feature_ids(items(d, 0)).is_empty() {
         return Err("select bodies first".into());
     }
     let need_point = |i: usize, what: &str| sel_point(app, d, items(d, i).first()).ok_or(format!("select {what} first"));
@@ -1169,7 +1185,10 @@ pub fn for_feature(
     feature: &solidcraft_engine::doc::FeatureKind,
     frame: &solidcraft_engine::doc::Mat,
 ) {
-    let solidcraft_engine::doc::FeatureKind::Move { bodies, translate, rotate_axis, rotate_about, origin, angle, copy, .. } = feature else { return };
+    let solidcraft_engine::doc::FeatureKind::Move { bodies, body_features, translate, rotate_axis, rotate_about, origin, angle, copy, .. } = feature
+    else {
+        return;
+    };
     let mut translate = translate.clone();
     let mut origin = origin.clone();
     let mut axis = rotate_axis.map(Vec3::from).unwrap_or(Vec3::Z);
@@ -1237,7 +1256,7 @@ pub fn for_feature(
     d.kind = k;
     d.inputs = inputs(mode);
     if let Some(inp) = d.inputs.first_mut() {
-        inp.items = bodies.iter().map(|n| Sel::Body { name: n.to_string() }).collect();
+        inp.items = crate::dialogs::body_and_feature_sels(bodies, body_features);
     }
     if *copy {
         d.extra.insert("copy".into(), json!(true));

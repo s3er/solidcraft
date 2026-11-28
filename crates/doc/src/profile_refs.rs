@@ -559,6 +559,7 @@ mod tests {
             .add_feature(
                 crate::FeatureKind::Extrude {
                     thin: None,
+                    target_features: Vec::new(),
                     sketch: crate::SketchId(feature),
                     profiles: selection.clone(),
                     extent: crate::Extent {
@@ -819,6 +820,7 @@ mod tests {
             .add_feature(
                 crate::FeatureKind::Extrude {
                     thin: None,
+                    target_features: Vec::new(),
                     sketch: crate::SketchId(feature),
                     profiles: selection.clone(),
                     extent: crate::Extent {

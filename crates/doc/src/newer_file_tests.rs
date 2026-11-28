@@ -25,6 +25,7 @@ fn extrude(sketch: u64) -> FeatureKind {
         extent: serde_json::from_value(json!({"distance": "depth"})).unwrap(),
         operation: crate::Operation::NewBody,
         targets: vec![],
+        target_features: Vec::new(),
     }
 }
 

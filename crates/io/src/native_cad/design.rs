@@ -358,6 +358,7 @@ impl Builder {
         let kind = FeatureKind::Extrude {
             sketch: SketchId(sketch),
             profiles,
+            target_features: Vec::new(),
             extent: Extent {
                 distance: mm(first.unwrap_or(10.0)),
                 convention,
@@ -592,6 +593,7 @@ impl Builder {
             angle: deg(first),
             operation,
             targets,
+            target_features: Vec::new(),
             angle2: second.map(deg),
             symmetric,
             convention: RevolveConvention::SketchNormal,

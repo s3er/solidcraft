@@ -90,14 +90,14 @@ fn schemas_and_the_key_check_agree() {
         input_schema_for::<RibParams>(),
         &["body_name", "body_names", "curves", "depth", "direction", "extend", "flip", "name", "participants", "sketch", "thickness", "touching"],
     );
-    assert_keys(input_schema_for::<RemoveParams>(), &["bodies", "body_name", "body_names", "name", "participants"]);
+    assert_keys(input_schema_for::<RemoveParams>(), &["bodies", "body_features", "body_name", "body_names", "name", "participants"]);
     assert_keys(
         input_schema_for::<EmbossParams>(),
-        &["body_name", "body_names", "depth", "face", "mode", "name", "participants", "profiles", "sketch", "targets"],
+        &["body_name", "body_names", "depth", "face", "mode", "name", "participants", "profiles", "sketch", "target_features", "targets"],
     );
     assert_keys(
         input_schema_for::<BoundaryFillParams>(),
-        &["body_name", "body_names", "cells", "name", "operation", "participants", "remove_tools", "tools", "touching"],
+        &["body_name", "body_names", "cells", "name", "operation", "participants", "remove_tools", "tool_features", "tools", "touching"],
     );
     assert_keys(
         input_schema_for::<CoilParams>(),
@@ -121,6 +121,7 @@ fn schemas_and_the_key_check_agree() {
             "section_size",
             "sketch",
             "start_angle",
+            "target_features",
             "targets",
             "turns",
         ],

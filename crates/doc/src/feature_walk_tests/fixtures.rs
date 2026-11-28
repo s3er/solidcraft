@@ -273,22 +273,29 @@ pub(super) fn with_refs(name: &str, mut v: Value) -> Value {
     let o = [0, 0, 0];
     let tool = json!({"body": "B", "point": o});
     let extra = match name {
-        "extrude" | "extrude_thin" | "revolve" | "sweep" | "sweep_options" | "pipe" | "coil" | "cell_grid" | "thicken" => json!({"targets": ["B"]}),
+        "extrude" | "extrude_thin" | "revolve" | "sweep" | "sweep_options" | "pipe" | "coil" | "cell_grid" => {
+            json!({"targets": ["B"], "target_features": [7]})
+        }
+        "thicken" => json!({"body_features": [7], "targets": ["B"], "target_features": [8]}),
         "fillet_constant" | "fillet_chord" | "fillet_curvature" | "fillet_variable" | "fillet_spline" | "chamfer" | "shell" | "draft"
         | "offset_face" | "delete_face" | "replace_face" | "sheet_flange" | "sheet_hem" | "sheet_perforate" | "sheet_path" | "sheet_tab"
         | "sheet_unfold" | "boss" | "lip" | "snap_fit" | "rest" | "surface_offset" => {
             json!({"body": "B"})
         }
-        "combine" => json!({"target": "B", "tools": ["B"]}),
+        "combine" => json!({"target": "B", "tools": ["B"], "tool_features": [7]}),
+        "boundary_fill" => json!({"tool_features": [7]}),
+        "scale" | "bounding_solid" | "align" | "remove" | "stitch" | "move" => json!({"body_features": [7]}),
         "pattern_rectangular" | "pattern_circular" | "pattern_path" | "mirror" => json!({"bodies": ["B"]}),
         "hole_simple" | "hole_drilled" | "hole_counterbore" | "hole_countersink" => json!({"points": {"sketch": 3, "ids": ["p"]}}),
-        "loft" => json!({"sections": [{"sketch": 4, "profiles": {"type": "all"}}, {"sketch": 5, "profiles": {"type": "all"}}], "targets": ["B"],
-            "rails": [{"sketch": 6, "curves": ["l1"]}]}),
+        "loft" => {
+            json!({"sections": [{"sketch": 4, "profiles": {"type": "all"}}, {"sketch": 5, "profiles": {"type": "all"}}], "targets": ["B"], "target_features": [7],
+            "rails": [{"sketch": 6, "curves": ["l1"]}]})
+        }
         "split" | "surface_trim" => json!({"tool": tool}),
         "split_line" => json!({"sketch": 6, "line": "l1"}),
         "surface_loft" => json!({"sections": [{"sketch": 4}, {"sketch": 5}], "rails": [{"sketch": 6, "curves": ["l1"]}]}),
         "split_face" => json!({"body": "B", "tool": tool, "sketch": 6}),
-        "emboss" => json!({"face": {"body": "B", "at": o}, "targets": ["B"]}),
+        "emboss" => json!({"face": {"body": "B", "at": o}, "targets": ["B"], "target_features": [7]}),
         "sheet_fold" => json!({"sketch": 7, "body": "B"}),
         "patch" => json!({"sketch": 8, "body": "B"}),
         _ => json!({}),

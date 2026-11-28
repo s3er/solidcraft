@@ -98,7 +98,7 @@ pub(super) fn local_geometry(f: &Feature, components: &std::collections::HashMap
         | FeatureKind::Import { file: _, step: _, components: _, skip: _, records: _ }
         | FeatureKind::MeshImport { file: _, meshes: _ } => true,
         FeatureKind::Sketch { plane, sketch } => sketch.links.is_empty() && sketch.wires.is_empty() && local_plane(plane, 0),
-        FeatureKind::Extrude { sketch, profiles: _, extent, operation: Operation::NewBody, targets: _, thin: _ } => {
+        FeatureKind::Extrude { sketch, profiles: _, extent, operation: Operation::NewBody, targets: _, target_features: _, thin: _ } => {
             let crate::Extent {
                 distance: _,
                 convention: _,

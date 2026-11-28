@@ -618,7 +618,9 @@ pub(super) fn build(
         .collect();
     if !moved_out.is_empty() {
         let name = unique("Assigned-out bodies", &mut used_features, origin.other_design);
-        let id = scratch.doc_mut().add_feature(FeatureKind::Remove { bodies: moved_out.into_iter().map(BodyName).collect() }, Some(&name))?;
+        let id = scratch
+            .doc_mut()
+            .add_feature(FeatureKind::Remove { bodies: moved_out.into_iter().map(BodyName).collect(), body_features: Vec::new() }, Some(&name))?;
         if let Some(f) = scratch.doc_mut().feature_mut(id) {
             f.component = root;
         }

@@ -979,7 +979,13 @@ fn a_combine_with_a_placed_copys_tool_keeps_its_result_when_other_placements_are
     let st = model.state();
     let name_of = |id: u64| st.bodies.iter().find(|b| b.feature == id).unwrap().name.clone();
     let (board, tool) = (name_of(board), crate::WorldNames::new(&doc, &st).name(&name_of(bit), drill, &[copy]));
-    let kind = FeatureKind::Combine { target: board.clone().into(), tools: vec![tool.into()], operation: Operation::Cut, keep_tools: true };
+    let kind = FeatureKind::Combine {
+        target: board.clone().into(),
+        tools: vec![tool.into()],
+        tool_features: Vec::new(),
+        operation: Operation::Cut,
+        keep_tools: true,
+    };
     let combine = doc.add_feature(kind, None).unwrap();
     model.evaluate(&doc);
     assert!(model.result(combine).is_some_and(|r| r.error.is_none()), "{:?}", model.result(combine));
@@ -1039,6 +1045,7 @@ fn extrude_from_the_plate(doc: &mut Document) -> (u64, u64, u64) {
         extent: serde_json::from_value(serde_json::json!({"distance": "6", "from": [5.0, 5.0, 4.0]})).unwrap(),
         operation: Operation::NewBody,
         targets: vec![],
+        target_features: Vec::new(),
     };
     (plate, other, add_named(doc, kind))
 }
@@ -1082,6 +1089,7 @@ fn a_revolve_to_its_own_part_keeps_its_result_when_another_part_moves() {
         angle: "90 deg".into(),
         operation: Operation::NewBody,
         targets: vec![],
+        target_features: Vec::new(),
         angle2: None,
         symmetric: false,
         convention: Default::default(),
@@ -3061,6 +3069,7 @@ fn plate_cut_by_squares(n: usize, shells: usize) -> (f64, usize, Option<String>)
         extent: serde_json::from_value(serde_json::json!({"distance": "3"})).unwrap(),
         operation: Operation::Cut,
         targets: vec![],
+        target_features: Vec::new(),
     };
     doc.add_feature(kind, Some("Squares")).unwrap();
     let mut model = Model::new();
@@ -3690,6 +3699,7 @@ fn boxes_joined(n: usize, pitch: f64) -> (Model, u64, Counts) {
             FeatureKind::Combine {
                 target: target.clone().into(),
                 tools: tools.iter().map(|t| t.clone().into()).collect(),
+                tool_features: Vec::new(),
                 operation: Operation::Join,
                 keep_tools: false,
             },

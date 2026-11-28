@@ -5321,3 +5321,70 @@ fn move_features_to_component_takes_the_selected_features() {
     assert_eq!(component_of(&app, boxed), part, "the selected feature moves");
     assert_ne!(component_of(&app, cylinder), part, "an unselected one stays");
 }
+
+/// Multi-body dialogs (`Combine`, `Move`, `Scale`, `Remove`, `BoundingSolid`, `Extrude` Target
+/// Bodies) accept mixed `Sel::Body` and `Sel::Feature` picks in the same input, emit the
+/// corresponding `*_features` parameters, and restore them intact when reopened for edit.
+#[test]
+fn feature_body_selection_dialogs_emit_and_restore_mixed_picks() {
+    let mut app = app_with(json!([
+        {"command": "parameters.add", "params": {"name": "n", "expression": "3", "unit": ""}},
+        {"command": "solid.box", "params": {"length": 100, "width": 20, "height": 10, "corner": [0, 0, 0], "body_name": "Base"}},
+        {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "corner": [5, 5, 10], "operation": "new", "body_name": "Boss"}},
+        {"command": "solid.pattern.rectangular", "params": {"bodies": ["Boss"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 20, "name": "BossPat"}}
+    ]));
+    let pat_id = app.session.doc.find_feature("BossPat").unwrap().id;
+
+    // Combine dialog: target body + mixed body & pattern feature tools.
+    app.session.selection.clear();
+    app.start("solid.combine");
+    {
+        let d = app.dialog.as_mut().unwrap();
+        assert_eq!(d.inputs[1].accept, crate::selection::BODY_OR_FEATURE);
+        d.inputs[0].items = vec![Sel::Body { name: "Base".into() }];
+        d.inputs[1].items = vec![Sel::Body { name: "Boss".into() }, Sel::Feature { id: pat_id }];
+    }
+    let cmds = apply_commands(&app, app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(cmds[0].0, "solid.combine");
+    assert_eq!(cmds[0].1["tools"], json!(["Boss"]));
+    assert_eq!(cmds[0].1["tool_features"], json!([pat_id]));
+    let reply = app.run(&cmds[0].0, cmds[0].1.clone()).unwrap();
+    let combine_id = reply["feature"].as_u64().unwrap();
+    app.dialog = None;
+
+    // Reopening Combine restores both Sel::Body and Sel::Feature.
+    let reopened = crate::dialogs::for_feature(&app, combine_id, None).unwrap();
+    assert_eq!(reopened.inputs[1].items, vec![Sel::Body { name: "Boss".into() }, Sel::Feature { id: pat_id }]);
+
+    // Remove dialog accepts Sel::Feature alone (no static bodies needed).
+    app.session.selection.clear();
+    app.start("solid.remove");
+    app.dialog.as_mut().unwrap().inputs[0].items = vec![Sel::Feature { id: pat_id }];
+    let rem_cmds = apply_commands(&app, app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(rem_cmds[0].0, "solid.remove");
+    assert!(rem_cmds[0].1.get("bodies").is_none());
+    assert_eq!(rem_cmds[0].1["body_features"], json!([pat_id]));
+    app.dialog = None;
+
+    // Scale dialog accepts Sel::Feature alone.
+    app.start("solid.scale");
+    app.dialog.as_mut().unwrap().inputs[0].items = vec![Sel::Feature { id: pat_id }];
+    let scale_cmds = apply_commands(&app, app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(scale_cmds[0].0, "solid.scale");
+    assert_eq!(scale_cmds[0].1["body_features"], json!([pat_id]));
+    app.dialog = None;
+
+    // Move dialog accepts Sel::Feature and includes body_features.
+    app.start("solid.move");
+    {
+        let d = app.dialog.as_mut().unwrap();
+        assert_eq!(d.inputs[0].accept, crate::selection::BODY_OR_FEATURE);
+        d.inputs[0].items = vec![Sel::Feature { id: pat_id }];
+        if let crate::dialogs::Kind::Move { x, .. } = &mut d.kind {
+            *x = "5 mm".into();
+        }
+    }
+    let move_cmds = apply_commands(&app, app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(move_cmds[0].0, "solid.move");
+    assert_eq!(move_cmds[0].1["body_features"], json!([pat_id]));
+}

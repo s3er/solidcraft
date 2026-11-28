@@ -30,6 +30,7 @@ fn schemas_and_the_key_check_agree() {
             "size",
             "sketch",
             "snap_inset",
+            "target_features",
             "targets",
             "through_all",
             "web",

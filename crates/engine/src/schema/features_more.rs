@@ -172,7 +172,7 @@ fn remove_bodies_schema(_: &mut SchemaGenerator) -> Schema {
 }
 
 fn bodies_required(schema: &mut Schema) {
-    require(schema, "bodies");
+    schema.insert("anyOf".into(), json!([{"required": ["bodies"]}, {"required": ["body_features"]}]));
 }
 
 /// Remove bodies from the design, from this point in the timeline on. One undo step.
@@ -183,6 +183,9 @@ pub struct RemoveParams {
     #[serde(default, deserialize_with = "remove_bodies")]
     #[schemars(schema_with = "remove_bodies_schema")]
     pub bodies: Option<NameList>,
+    /// Upstream features whose live created bodies are removed.
+    #[serde(default)]
+    pub body_features: Option<super::types::FeatureRefList<true>>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }
@@ -236,8 +239,8 @@ impl JsonSchema for FillCells {
 }
 
 fn tools_and_cells_required(schema: &mut Schema) {
-    require(schema, "tools");
     require(schema, "cells");
+    schema.insert("anyOf".into(), json!([{"required": ["tools"]}, {"required": ["tool_features"]}]));
 }
 
 /// Add a solid made of the cells that tool bodies enclose, each picked by a point inside it, and
@@ -251,6 +254,9 @@ pub struct BoundaryFillParams {
     #[serde(default, deserialize_with = "fill_tools")]
     #[schemars(schema_with = "fill_tools_schema")]
     pub tools: Option<NameList>,
+    /// Upstream features whose live created bodies are used as tool bodies.
+    #[serde(default)]
+    pub tool_features: Option<super::types::FeatureRefList<true>>,
     #[serde(default, deserialize_with = "present")]
     #[schemars(with = "FillCells")]
     pub cells: Option<FillCells>,
@@ -333,6 +339,9 @@ pub struct CoilParams {
     /// Ignored when `participants` lists bodies.
     #[serde(default)]
     pub targets: Option<StringList>,
+    /// Upstream features whose live created bodies take part in a join, cut or intersect.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }
@@ -356,6 +365,9 @@ pub struct EmbossParams {
     /// The bodies to emboss, by name. With `face`, only these are searched for it.
     #[serde(default)]
     pub targets: Option<NameList>,
+    /// Upstream features whose live created bodies are embossed or debossed.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     /// A world point on the face to emboss: planar, a cylinder wall (either side) or another curved face. Default:
     /// inferred when exactly one supported tangent cylinder matches the selected profiles.
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]

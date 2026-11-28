@@ -151,6 +151,7 @@ fn coil(s: &mut Session, p: &Value) -> Result<Value> {
         Some(o) => return Err(bad(cmd, format!("unknown end cut `{o}` (axial or square)"))),
     };
     let operation = super::features::operation(p, cmd)?;
+    let target_features = super::features::feature_body_refs(s, p, "target_features", cmd)?;
     add_feature(
         s,
         p,
@@ -170,6 +171,7 @@ fn coil(s: &mut Session, p: &Value) -> Result<Value> {
             end_cut,
             operation,
             targets: string_list(cmd, p, "targets")?.into_iter().map(BodyName).collect(),
+            target_features,
         },
     )
 }
@@ -229,6 +231,8 @@ fn emboss(s: &mut Session, p: &Value) -> Result<Value> {
         Some(m) => return Err(bad(cmd, format!("unknown mode `{m}` (emboss or deboss)"))),
     };
     let mut targets = string_list(cmd, p, "targets")?;
+    let mut target_features = super::features::feature_body_refs(s, p, "target_features", cmd)?;
+    let search_targets = super::features::resolved_body_names(s, &targets, &target_features);
     let face = if let Some(value) = p.get("face") {
         let local = vec3(value).ok_or_else(|| bad(cmd, "`face` must be a finite point [x,y,z]"))?;
         let at = solidcraft_doc::apply_point(&s.active_component_frame(), local);
@@ -238,7 +242,7 @@ fn emboss(s: &mut Session, p: &Value) -> Result<Value> {
         let mut nearest: Option<(f64, &str)> = None;
         for body in &state.bodies {
             let definition = body.definition_name();
-            if !targets.is_empty() && !targets.iter().any(|n| n == definition || n == &body.name) {
+            if !search_targets.is_empty() && !search_targets.iter().any(|n| n == definition || n == &body.name) {
                 continue;
             }
             let mesh = body.mesh();
@@ -291,18 +295,28 @@ fn emboss(s: &mut Session, p: &Value) -> Result<Value> {
         let face = emboss_selection(s, selected, at)?;
         check_emboss_positions(s, sketch, selected, &face)?;
         targets = vec![name.to_owned()];
+        target_features.clear();
         Some(face)
     } else {
-        let inferred = infer_emboss_selection(s, sketch, &profiles, &depth, deboss, &targets)?;
+        let inferred = infer_emboss_selection(s, sketch, &profiles, &depth, deboss, &search_targets)?;
         if let Some(face) = &inferred {
             targets = vec![face.body.0.clone()];
+            target_features.clear();
         }
         inferred
     };
     add_feature(
         s,
         p,
-        FeatureKind::Emboss { sketch: SketchId(sketch), profiles, depth, deboss, targets: targets.into_iter().map(BodyName).collect(), face },
+        FeatureKind::Emboss {
+            sketch: SketchId(sketch),
+            profiles,
+            depth,
+            deboss,
+            targets: targets.into_iter().map(BodyName).collect(),
+            target_features,
+            face,
+        },
     )
 }
 
@@ -489,7 +503,8 @@ pub(crate) fn side_point(v: Option<&Value>, pk: &str, fk: &str) -> std::result::
 fn align(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.align";
     let bodies = string_list(cmd, p, "bodies")?;
-    if bodies.is_empty() {
+    let body_features = super::features::feature_body_refs(s, p, "body_features", cmd)?;
+    if bodies.is_empty() && body_features.is_empty() {
         return Err(bad(cmd, "`bodies` must list the bodies to move"));
     }
     {
@@ -498,16 +513,18 @@ fn align(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(cmd, format!("no body `{b}`")));
         }
     }
+    let resolved = super::features::resolved_body_names(s, &bodies, &body_features);
     // Picks and snaps are where the view shows them (the world); the feature moves the bodies
     // in their component's frame, so both ends go into the first moved body's frame. A body
     // picked in another placed component (aligning two imported parts) is found where it
     // is shown, not where its own frame has it.
-    let frame = s
-        .placed_document()
-        .body_frames_with_source(&s.model.state())
-        .into_iter()
-        .find(|(world, own, ..)| *world == bodies[0] || *own == bodies[0])
-        .map(|(.., m)| m);
+    let frame = resolved.first().and_then(|first| {
+        s.placed_document()
+            .body_frames_with_source(&s.model.state())
+            .into_iter()
+            .find(|(world, own, ..)| world == first || own == first)
+            .map(|(.., m)| m)
+    });
     let inverse = frame.and_then(|m| solidcraft_doc::mat_inverse(&m)).unwrap_or(solidcraft_doc::IDENTITY);
     // A side is a plane (`from_plane`/`to_plane`: XY|XZ|YZ, a construction or offset plane, or
     // {origin, normal}), kept as a plane so the bodies follow it when it moves; or a point and, for
@@ -517,13 +534,13 @@ fn align(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let (from_plane, to_plane) = (plane(s, "from_plane")?, plane(s, "to_plane")?);
     // Or a frame (#6257), found again when the feature is evaluated.
-    let (from_frame, to_frame) = (align_frame(s, p, "from", &bodies)?, align_frame(s, p, "to", &bodies)?);
+    let (from_frame, to_frame) = (align_frame(s, p, "from", &resolved)?, align_frame(s, p, "to", &resolved)?);
     // A target on the bodies that move would move away with them: it must be found the same
     // without them.
     if let Some(fr @ AlignFrame::Origin { .. }) = &to_frame {
         let st = s.model.state();
         let mut rest = (*st).clone();
-        rest.bodies.retain(|b| !bodies.contains(&b.name));
+        rest.bodies.retain(|b| !resolved.contains(&b.name));
         let same = |(a, n): (Vec3, Vec3), (b, m): (Vec3, Vec3)| a.dist(b) <= 1e-9 * (1.0 + a.len()) && n.dot(m) > 1.0 - 1e-12;
         if !matches!((fr.resolve(&s.doc, &st), fr.resolve(&s.doc, &rest)), (Ok(a), Ok(b)) if same(a, b)) {
             return Err(bad(cmd, "`to_frame` is on a body that moves: pick the target on another body or on a sketch"));
@@ -595,6 +612,7 @@ fn align(s: &mut Session, p: &Value) -> Result<Value> {
         p,
         FeatureKind::Align {
             bodies: bodies.into_iter().map(BodyName).collect(),
+            body_features,
             from: Position(from),
             to: Position(to),
             from_normal: from_normal.map(Dir),
@@ -676,14 +694,15 @@ fn align_frame(s: &Session, p: &Value, key: &str, bodies: &[String]) -> Result<O
 fn remove(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.remove";
     let bodies = string_list(cmd, p, "bodies")?;
-    if bodies.is_empty() {
+    let body_features = super::features::feature_body_refs(s, p, "body_features", cmd)?;
+    if bodies.is_empty() && body_features.is_empty() {
         return Err(bad(cmd, "`bodies` must list bodies"));
     }
     let st = s.model.state();
     if let Some(b) = bodies.iter().find(|b| st.body(b).is_none()) {
         return Err(bad(cmd, format!("no body `{b}`")));
     }
-    add_feature(s, p, FeatureKind::Remove { bodies: bodies.into_iter().map(BodyName).collect() })
+    add_feature(s, p, FeatureKind::Remove { bodies: bodies.into_iter().map(BodyName).collect(), body_features })
 }
 
 #[cfg(test)]
@@ -727,8 +746,9 @@ pub(crate) fn snap_point(st: &solidcraft_doc::ModelState, kind: &str, at: Vec3) 
 fn boundary_fill(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.boundary_fill";
     let tools = string_list(cmd, p, "tools")?;
+    let tool_features = super::features::feature_body_refs(s, p, "tool_features", cmd)?;
     let st = s.model.state();
-    if tools.is_empty() || tools.len() > 64 || tools.iter().any(|t| st.body(t).is_none()) {
+    if (tools.is_empty() && tool_features.is_empty()) || tools.len() > 64 || tools.iter().any(|t| st.body(t).is_none()) {
         return Err(bad(cmd, "`tools` must list 1…64 bodies"));
     }
     let cells: Vec<Vec3> = p.get("cells").and_then(Value::as_array).map(|a| a.iter().filter_map(vec3).collect()).unwrap_or_default();
@@ -741,6 +761,7 @@ fn boundary_fill(s: &mut Session, p: &Value) -> Result<Value> {
         p,
         FeatureKind::BoundaryFill {
             tools: tools.into_iter().map(BodyName).collect(),
+            tool_features,
             cells: cells.into_iter().map(Position).collect(),
             operation,
             remove_tools: bool_(p, "remove_tools").unwrap_or(false),

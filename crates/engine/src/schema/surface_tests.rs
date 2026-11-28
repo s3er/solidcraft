@@ -77,14 +77,17 @@ fn schemas_and_the_key_check_agree() {
         keys.sort_unstable();
         keys
     };
-    assert_keys(input_schema_for::<StitchParams>(), &with(&["bodies", "tolerance"]));
+    assert_keys(input_schema_for::<StitchParams>(), &with(&["bodies", "body_features", "tolerance"]));
     assert_keys(
         input_schema_for::<PatchParams>(),
         &["body", "body_name", "body_names", "continuity", "crown", "edges", "name", "participants", "points", "profiles", "profiles_3d", "sketch"],
     );
     assert_keys(input_schema_for::<UnstitchParams>(), &with(&["body", "faces"]));
     assert_keys(input_schema_for::<ReverseNormalParams>(), &with(&["body", "faces"]));
-    assert_keys(input_schema_for::<ThickenParams>(), &with(&["bodies", "operation", "symmetric", "targets", "thickness", "touching"]));
+    assert_keys(
+        input_schema_for::<ThickenParams>(),
+        &with(&["bodies", "body_features", "operation", "symmetric", "target_features", "targets", "thickness", "touching"]),
+    );
     assert_keys(input_schema_for::<OffsetParams>(), &with(&["body", "chain", "distance", "faces", "tolerance"]));
     assert_keys(input_schema_for::<UntrimParams>(), &with(&["face", "holes", "in_place", "outer"]));
     assert_keys(input_schema_for::<FairParams>(), &with(&["body", "faces", "iterations", "keep_edges", "strength", "tolerance"]));

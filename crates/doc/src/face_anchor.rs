@@ -701,6 +701,7 @@ mod tests {
                     extent,
                     operation: crate::Operation::NewBody,
                     targets: vec![],
+                    target_features: Vec::new(),
                 },
                 None,
             )
@@ -812,6 +813,7 @@ mod tests {
                     extent,
                     operation: crate::Operation::NewBody,
                     targets: vec![],
+                    target_features: Vec::new(),
                 },
                 Some("Boss"),
             )

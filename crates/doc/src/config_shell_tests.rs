@@ -124,6 +124,7 @@ fn shell_planar_anchor_rebuild_cold_geometry_and_missing_source_errors() {
                 extent: serde_json::from_value(json!({"distance":"2"})).unwrap(),
                 operation: crate::Operation::NewBody,
                 targets: vec![],
+                target_features: Vec::new(),
             },
             Some("Face boss"),
         )
@@ -272,6 +273,7 @@ fn saved_former_strip_projection_asks_for_its_face_again_without_expanding_healt
                 extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),
                 operation: crate::Operation::NewBody,
                 targets: vec![],
+                target_features: Vec::new(),
             },
             Some("Saved strip profile material"),
         )
@@ -366,6 +368,7 @@ fn saved_curved_strip_projection_is_named_lost_after_exact_wall_coalescence() {
                 extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),
                 operation: crate::Operation::NewBody,
                 targets: vec![],
+                target_features: Vec::new(),
             },
             Some("Retained strip material"),
         )
@@ -407,7 +410,13 @@ fn saved_stepped_tab_cut_piece_projection_is_named_lost_without_expanding_materi
         doc.feature_mut(id).unwrap().body_names = vec![name.into()];
     }
     doc.add_feature(
-        FeatureKind::Combine { target: "Case".into(), tools: vec!["Tab".into()], operation: crate::Operation::Join, keep_tools: false },
+        FeatureKind::Combine {
+            target: "Case".into(),
+            tools: vec!["Tab".into()],
+            tool_features: Vec::new(),
+            operation: crate::Operation::Join,
+            keep_tools: false,
+        },
         None,
     )
     .unwrap();
@@ -422,7 +431,13 @@ fn saved_stepped_tab_cut_piece_projection_is_named_lost_without_expanding_materi
         .unwrap();
     doc.feature_mut(tool).unwrap().body_names = vec!["Pocket tool".into()];
     doc.add_feature(
-        FeatureKind::Combine { target: "Case".into(), tools: vec!["Pocket tool".into()], operation: crate::Operation::Cut, keep_tools: false },
+        FeatureKind::Combine {
+            target: "Case".into(),
+            tools: vec!["Pocket tool".into()],
+            tool_features: Vec::new(),
+            operation: crate::Operation::Cut,
+            keep_tools: false,
+        },
         Some("Pocket"),
     )
     .unwrap();
@@ -469,6 +484,7 @@ fn saved_stepped_tab_cut_piece_projection_is_named_lost_without_expanding_materi
                 extent: serde_json::from_value(json!({"distance":"1"})).unwrap(),
                 operation: crate::Operation::NewBody,
                 targets: vec![],
+                target_features: Vec::new(),
             },
             Some("Saved band stock"),
         )

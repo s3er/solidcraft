@@ -1156,6 +1156,7 @@ pub(super) fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, worl
     // hole, which is always a cut (one at the points of a sketch on a nested part's face).
     let participants = if participants.is_empty()
         && !primitive
+        && kind.target_features().is_empty()
         && (matches!(str_(p, "operation").and_then(Operation::parse), Some(Operation::Cut | Operation::Intersect))
             || matches!(&kind, FeatureKind::Extrude { operation: Operation::Cut | Operation::Intersect, .. } | FeatureKind::Hole { .. }))
         && s.cut_takes_every_body(&s.model.state())
@@ -1168,8 +1169,8 @@ pub(super) fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, worl
     // component that are shown, never a hidden one (#2464). The shown ones are kept as its
     // participants, so showing or hiding bodies later doesn't change the model.
     let participants = match &kind {
-        FeatureKind::Extrude { operation: Operation::Join | Operation::Cut | Operation::Intersect, targets, .. }
-            if participants.is_empty() && targets.is_empty() =>
+        FeatureKind::Extrude { operation: Operation::Join | Operation::Cut | Operation::Intersect, targets, target_features, .. }
+            if participants.is_empty() && targets.is_empty() && target_features.is_empty() =>
         {
             let shown = shown_scope(s).unwrap_or_default();
             if shown.is_empty() && shown_scope(s).is_some() {
@@ -1399,8 +1400,9 @@ fn extrude_from(s: &mut Session, p: &Value, grouped: Option<FaceProfile>) -> Res
         _ if p.get("thin").is_some_and(|v| !v.is_boolean()) => return Err(bad(cmd, "`thin` must be true or false")),
         _ => None,
     };
+    let target_features = feature_body_refs(s, p, "target_features", cmd)?;
     let auto = str_(p, "operation").is_some_and(|o| o.eq_ignore_ascii_case("auto"));
-    let named = !string_list(cmd, p, "targets")?.is_empty() || !string_list(cmd, p, "participants")?.is_empty();
+    let named = !string_list(cmd, p, "targets")?.is_empty() || !target_features.is_empty() || !string_list(cmd, p, "participants")?.is_empty();
     // Auto leaves the hidden body the sketch is on alone, as its probe does.
     let auto_hidden = if auto && face_body.is_none() && !named { hidden_face_body(s, sketch) } else { None };
     let operation = if auto {
@@ -1413,7 +1415,7 @@ fn extrude_from(s: &mut Session, p: &Value, grouped: Option<FaceProfile>) -> Res
     };
     let mut targets = string_list(cmd, p, "targets")?;
     let mut p = std::borrow::Cow::Borrowed(p);
-    if operation == Operation::Join && targets.is_empty() && string_list(cmd, &p, "participants")?.is_empty() {
+    if operation == Operation::Join && targets.is_empty() && target_features.is_empty() && string_list(cmd, &p, "participants")?.is_empty() {
         // A face's outward extension joins that body, and so does a profile sketched on a body's
         // face. Assembly neighbours can touch only an edge of the tool: trying to join them
         // first fails, or absorbs unrelated parts (#226). A profile drawn past the face can lie
@@ -1434,7 +1436,9 @@ fn extrude_from(s: &mut Session, p: &Value, grouped: Option<FaceProfile>) -> Res
             ));
         }
         p.to_mut()["participants"] = json!(shown);
-    } else if let Some(parts) = cut_scope(s, &p, operation, sketch, face_body, cmd)? {
+    } else if target_features.is_empty()
+        && let Some(parts) = cut_scope(s, &p, operation, sketch, face_body, cmd)?
+    {
         p.to_mut()["participants"] = json!(parts);
     }
     let kind = FeatureKind::Extrude {
@@ -1448,6 +1452,7 @@ fn extrude_from(s: &mut Session, p: &Value, grouped: Option<FaceProfile>) -> Res
         extent,
         operation,
         targets: targets.into_iter().map(BodyName).collect(),
+        target_features,
         thin,
     };
     add_feature(s, &p, kind)
@@ -1655,7 +1660,8 @@ fn shown_face_body(s: &Session, sketch: u64, cmd: &str) -> Result<Option<String>
 /// `participants` keep theirs.
 fn face_join_targets(s: &Session, p: &Value, operation: Operation, sketches: &[u64], cmd: &str) -> Result<Vec<BodyName>> {
     let mut targets = string_list(cmd, p, "targets")?;
-    if operation == Operation::Join && targets.is_empty() && string_list(cmd, p, "participants")?.is_empty() {
+    let has_target_features = !feature_body_refs(s, p, "target_features", cmd)?.is_empty();
+    if operation == Operation::Join && targets.is_empty() && !has_target_features && string_list(cmd, p, "participants")?.is_empty() {
         for sketch in sketches {
             if let Some(body) = shown_face_body(s, *sketch, cmd)? {
                 targets.push(body);
@@ -1882,14 +1888,17 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
             body_reachable(s, body, &[])?;
         }
     }
+    let target_features = feature_body_refs(s, p, "target_features", cmd)?;
     // A fixed plane keeps no attachment to the face, so its body is the one picked.
-    if unnamed && operation == Operation::Join {
+    if unnamed && target_features.is_empty() && operation == Operation::Join {
         targets.extend(face_body.clone().map(BodyName));
     }
     // From a profile on a body's face in a component inside the active one, a cut changes that
     // body too, as an extrude's does (#5679).
     let mut p = std::borrow::Cow::Borrowed(p);
-    if let Some(parts) = cut_scope(s, &p, operation, sketch, face_body, cmd)? {
+    if target_features.is_empty()
+        && let Some(parts) = cut_scope(s, &p, operation, sketch, face_body, cmd)?
+    {
         p.to_mut()["participants"] = json!(parts);
     }
     let kind = FeatureKind::Revolve {
@@ -1899,6 +1908,7 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
         angle,
         operation,
         targets,
+        target_features,
         angle2,
         symmetric,
         convention,
@@ -2859,11 +2869,68 @@ fn chamfer(s: &mut Session, p: &Value) -> Result<Value> {
     )
 }
 
+/// Parse upstream feature references (`body_features`, `tool_features`, `target_features`) by id
+/// or name into deduplicated `FeatureId`s. Absent or `null` returns an empty list.
+pub(crate) fn feature_body_refs(s: &Session, p: &Value, key: &str, cmd: &str) -> Result<Vec<solidcraft_doc::FeatureId>> {
+    let items: Vec<&Value> = match p.get(key) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() <= 10_000 => a.iter().collect(),
+        Some(Value::Array(_)) => return Err(bad(cmd, format!("too many `{key}`"))),
+        Some(one @ (Value::Number(_) | Value::String(_))) => vec![one],
+        Some(_) => return Err(bad(cmd, format!("`{key}` must be a list of feature ids or names"))),
+    };
+    let mut ids = Vec::with_capacity(items.len());
+    for v in items {
+        let id = match v {
+            Value::Number(n) => {
+                let id = n.as_u64().ok_or_else(|| bad(cmd, format!("`{key}` entries must be feature ids or names")))?;
+                if s.doc.feature(id).is_none() {
+                    return Err(bad(cmd, format!("no feature {id}")));
+                }
+                solidcraft_doc::FeatureId(id)
+            }
+            Value::String(name) => {
+                let f = s.doc.find_feature(name).ok_or_else(|| bad(cmd, format!("no feature `{name}`")))?;
+                solidcraft_doc::FeatureId(f.id)
+            }
+            _ => return Err(bad(cmd, format!("`{key}` entries must be feature ids or names"))),
+        };
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Resolve current live (non-envelope) body names for explicit `bodies` plus dynamic `features`,
+/// deduplicating while preserving order.
+pub(crate) fn resolved_body_names(s: &Session, explicit: &[String], features: &[solidcraft_doc::FeatureId]) -> Vec<String> {
+    let st = s.model.state();
+    let mut out = Vec::with_capacity(explicit.len() + features.len());
+    for name in explicit {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    for id in features {
+        if s.doc.feature(id.0).is_some_and(|f| f.suppressed) {
+            continue;
+        }
+        for name in st.feature_body_names(id.0) {
+            if !out.iter().any(|s| s == name) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn combine(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.combine";
     let target = str_(p, "target").ok_or_else(|| bad(cmd, "`target` must be a body name"))?.to_string();
     let tools = string_list(cmd, p, "tools")?;
-    if tools.is_empty() {
+    let tool_features = feature_body_refs(s, p, "tool_features", cmd)?;
+    if tools.is_empty() && tool_features.is_empty() {
         return Err(bad(cmd, "`tools` must list bodies"));
     }
     let op = match str_(p, "operation") {
@@ -2876,6 +2943,7 @@ fn combine(s: &mut Session, p: &Value) -> Result<Value> {
         FeatureKind::Combine {
             target: target.clone().into(),
             tools: tools.into_iter().map(BodyName).collect(),
+            tool_features,
             operation: op,
             keep_tools: bool_(p, "keep_tools").unwrap_or(false),
         },
@@ -2937,16 +3005,18 @@ fn move_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("copy").is_some_and(|v| !v.is_boolean()) {
         return Err(bad(cmd, "copy must be a boolean"));
     }
-    if let Some(paths) = copied_components(p)? {
-        return copy_components(s, p, paths);
-    }
-    if let Some(plan) = crate::frames::placements_moved(s, p) {
-        return move_placements(s, p, plan);
-    }
-    // Bodies in differently placed frames: one Move feature per frame, each moving its bodies
-    // by the world vector and turn mapped into that frame (#9660).
-    if let Some(moves) = crate::frames::split_move(s, p)? {
-        return move_split(s, &moves);
+    if p.get("body_features").is_none_or(Value::is_null) {
+        if let Some(paths) = copied_components(p)? {
+            return copy_components(s, p, paths);
+        }
+        if let Some(plan) = crate::frames::placements_moved(s, p) {
+            return move_placements(s, p, plan);
+        }
+        // Bodies in differently placed frames: one Move feature per frame, each moving its bodies
+        // by the world vector and turn mapped into that frame (#9660).
+        if let Some(moves) = crate::frames::split_move(s, p)? {
+            return move_split(s, &moves);
+        }
     }
     move_body_feature(s, p)
 }
@@ -3126,7 +3196,8 @@ fn move_turn_about(s: &Session, p: &Value, cmd: &str) -> Result<Option<solidcraf
 fn move_body_feature(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.move";
     let bodies = string_list(cmd, p, "bodies")?;
-    if bodies.is_empty() {
+    let body_features = feature_body_refs(s, p, "body_features", cmd)?;
+    if bodies.is_empty() && body_features.is_empty() {
         return Err(bad(cmd, "`bodies` must list bodies"));
     }
     let translate = point_param(s, p, "translate", cmd)?.unwrap_or_else(|| point_expr(Vec3::ZERO));
@@ -3134,7 +3205,7 @@ fn move_body_feature(s: &mut Session, p: &Value) -> Result<Value> {
     let rotate_about = move_turn_about(s, p, cmd)?;
     let copy = bool_(p, "copy").unwrap_or(false);
     // The command boundary captures these before instance names become definition names.
-    let copy_frames: Vec<solidcraft_doc::Mat> = if copy {
+    let copy_frames: Vec<solidcraft_doc::Mat> = if copy && body_features.is_empty() {
         p.get("_copy_frames")
             .cloned()
             .or_else(crate::frames::take_copy_frames)
@@ -3147,11 +3218,13 @@ fn move_body_feature(s: &mut Session, p: &Value) -> Result<Value> {
     if !copy_frames.is_empty() && (copy_frames.len() != bodies.len() || copy_frames.iter().any(|m| !solidcraft_doc::valid_transfer_matrix(m))) {
         return Err(bad(cmd, "invalid copy placements"));
     }
+    let sources = if copy { resolved_body_names(s, &bodies, &body_features) } else { Vec::new() };
     let reply = add_feature(
         s,
         p,
         FeatureKind::Move {
             bodies: bodies.iter().cloned().map(BodyName).collect(),
+            body_features,
             translate,
             origin,
             rotate_axis: p.get("axis").and_then(vec3).map(Dir),
@@ -3161,9 +3234,9 @@ fn move_body_feature(s: &mut Session, p: &Value) -> Result<Value> {
             copy_frames,
         },
     )?;
-    if copy {
-        copy_keeps_appearance(s, &reply, &bodies, cmd)?;
-        super::print_face::copies_keep_print_faces(s, &reply, &bodies);
+    if copy && !sources.is_empty() {
+        copy_keeps_appearance(s, &reply, &sources, cmd)?;
+        super::print_face::copies_keep_print_faces(s, &reply, &sources);
     }
     Ok(reply)
 }
@@ -4827,9 +4900,10 @@ fn sweep(s: &mut Session, p: &Value) -> Result<Value> {
     let (orientation, twist, scale) = sweep_options(s, p, cmd)?;
     let (rails, rail_fit) = sweep_rails(s, p, cmd, path_body.is_none().then_some(path_sketch))?;
     let operation = operation(p, cmd)?;
+    let target_features = feature_body_refs(s, p, "target_features", cmd)?;
     let mut targets = face_join_targets(s, p, operation, &[sketch], cmd)?;
     // A sweep from a face joins the body the face is on, as a revolve's does (#2747).
-    if targets.is_empty() && operation == Operation::Join && string_list(cmd, p, "participants")?.is_empty() {
+    if targets.is_empty() && target_features.is_empty() && operation == Operation::Join && string_list(cmd, p, "participants")?.is_empty() {
         targets.extend(face_body.clone().map(BodyName));
     }
     let profiles = match face_profile {
@@ -4850,6 +4924,7 @@ fn sweep(s: &mut Session, p: &Value) -> Result<Value> {
         rail_fit,
         operation,
         targets,
+        target_features,
     };
     // The path's points on a body's edges and the direction the profile follows are given in the
     // world: they go into the active component's frame, as `frames` maps the face pick.
@@ -5043,8 +5118,13 @@ fn loft(s: &mut Session, p: &Value) -> Result<Value> {
     let (rails, rail_fit) = guide_rails(s, p, cmd, "loft", None)?;
     let operation = operation(p, cmd)?;
     let sketches: Vec<u64> = sections.iter().map(|sec| sec.sketch.0).collect();
+    let target_features = feature_body_refs(s, p, "target_features", cmd)?;
     let mut targets = face_join_targets(s, p, operation, &sketches, cmd)?;
-    if operation == Operation::Join && string_list(cmd, p, "targets")?.is_empty() && string_list(cmd, p, "participants")?.is_empty() {
+    if operation == Operation::Join
+        && string_list(cmd, p, "targets")?.is_empty()
+        && target_features.is_empty()
+        && string_list(cmd, p, "participants")?.is_empty()
+    {
         let st = s.model.state();
         let candidates: Vec<_> = st
             .bodies
@@ -5062,7 +5142,7 @@ fn loft(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    add_feature(s, p, FeatureKind::Loft { sections, operation, targets, rails, rail_fit })
+    add_feature(s, p, FeatureKind::Loft { sections, operation, targets, target_features, rails, rail_fit })
 }
 
 fn thread(s: &mut Session, p: &Value) -> Result<Value> {
@@ -5275,6 +5355,7 @@ fn pipe(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(w) = &wall {
         check_expr(s, w, Kind::Length, cmd, "wall")?;
     }
+    let target_features = feature_body_refs(s, p, "target_features", cmd)?;
     add_feature(
         s,
         p,
@@ -5285,6 +5366,7 @@ fn pipe(s: &mut Session, p: &Value) -> Result<Value> {
             wall,
             operation: operation(p, cmd)?,
             targets: string_list(cmd, p, "targets")?.into_iter().map(BodyName).collect(),
+            target_features,
         },
     )
 }
@@ -5305,10 +5387,11 @@ fn bounding_solid(s: &mut Session, p: &Value) -> Result<Value> {
         None => None,
     };
     let bodies: Vec<BodyName> = string_list(cmd, p, "bodies")?.into_iter().map(BodyName).collect();
+    let body_features = feature_body_refs(s, p, "body_features", cmd)?;
     if p.get("component").is_none_or(Value::is_null) {
-        return add_feature(s, p, FeatureKind::BoundingSolid { bodies, margin, contents: false, margins });
+        return add_feature(s, p, FeatureKind::BoundingSolid { bodies, body_features, margin, contents: false, margins });
     }
-    if !bodies.is_empty() {
+    if !bodies.is_empty() || !body_features.is_empty() {
         return Err(bad(cmd, "give `bodies` or `component`, not both"));
     }
     let component = super::component::component(s, p, "component", cmd)?;
@@ -5325,7 +5408,7 @@ pub(crate) fn envelope_in(s: &mut Session, p: &Value, component: u64, margin: Ex
     }
     let active = (s.active_component, s.active_occurrence_path.take());
     s.active_component = component;
-    let out = add_feature(s, p, FeatureKind::BoundingSolid { bodies: Vec::new(), margin, contents: true, margins });
+    let out = add_feature(s, p, FeatureKind::BoundingSolid { bodies: Vec::new(), body_features: Vec::new(), margin, contents: true, margins });
     (s.active_component, s.active_occurrence_path) = active;
     out
 }
@@ -5333,7 +5416,8 @@ pub(crate) fn envelope_in(s: &mut Session, p: &Value, component: u64, margin: Ex
 fn scale(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "solid.scale";
     let bodies = string_list(cmd, p, "bodies")?;
-    if bodies.is_empty() {
+    let body_features = feature_body_refs(s, p, "body_features", cmd)?;
+    if bodies.is_empty() && body_features.is_empty() {
         return Err(bad(cmd, "`bodies` must list bodies"));
     }
     let factors = match p.get("factors").and_then(Value::as_array) {
@@ -5354,7 +5438,11 @@ fn scale(s: &mut Session, p: &Value) -> Result<Value> {
     };
     check_expr(s, &factor, Kind::Unitless, cmd, "factor")?;
     let origin = p.get("origin").and_then(vec3).unwrap_or(Vec3::ZERO);
-    add_feature(s, p, FeatureKind::Scale { bodies: bodies.into_iter().map(BodyName).collect(), origin: Position(origin), factor, factors })
+    add_feature(
+        s,
+        p,
+        FeatureKind::Scale { bodies: bodies.into_iter().map(BodyName).collect(), body_features, origin: Position(origin), factor, factors },
+    )
 }
 
 fn delete_face(s: &mut Session, p: &Value) -> Result<Value> {

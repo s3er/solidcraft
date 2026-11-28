@@ -71,6 +71,9 @@ pub const CURVES: Accept = 256;
 pub const POINTS: Accept = 512;
 /// Timeline features (pattern objects), picked in the timeline.
 pub const FEATURES: Accept = 1024;
+/// Bodies (viewport or browser) and/or upstream timeline features whose live created bodies are
+/// resolved dynamically on rebuild.
+pub const BODY_OR_FEATURE: Accept = BODIES | FEATURES;
 /// Points of the sketch being modified; unlike POINTS these never enable cross-sketch picking.
 pub const SKETCH_POINTS: Accept = 2048;
 /// The origin point, picked as a vertex of no body (in the viewport or the browser's Origin).

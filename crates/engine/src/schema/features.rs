@@ -162,6 +162,9 @@ pub struct ExtrudeParams {
     /// that body.
     #[serde(default)]
     pub targets: Option<StringList>,
+    /// Upstream features whose live created bodies take part in a join, cut or intersect.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     /// What a join makes of pieces that share no face. Default: separate.
     #[serde(default)]
     pub touching: Option<TouchingParam>,
@@ -264,6 +267,9 @@ pub struct RevolveParams {
     /// from a sketch on one: that body. Explicit `targets` or `participants` replace it.
     #[serde(default)]
     pub targets: Option<StringList>,
+    /// Upstream features whose live created bodies take part in a join, cut or intersect.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     /// What a join makes of pieces that share no face. Default: separate.
     #[serde(default)]
     pub touching: Option<TouchingParam>,
@@ -450,6 +456,9 @@ pub struct PipeParams {
     /// those the pipe doesn't meet), or for a cut or intersect where it has none, every body.
     #[serde(default)]
     pub targets: Option<StringList>,
+    /// Upstream features whose live created bodies take part in a join, cut or intersect.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }
@@ -514,6 +523,9 @@ pub struct SweepParams {
     /// or for a cut or intersect where it has none, every body.
     #[serde(default)]
     pub targets: Option<StringList>,
+    /// Upstream features whose live created bodies take part in a join, cut or intersect.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     /// What a join makes of pieces that share no face. Default: separate.
     #[serde(default)]
     pub touching: Option<TouchingParam>,
@@ -604,6 +616,9 @@ pub struct BoundingSolidParams {
     /// The bodies to enclose (`participants` doesn't change which). Default: all of them.
     #[serde(default)]
     pub bodies: Option<StringList>,
+    /// Upstream features whose live created bodies are enclosed.
+    #[serde(default)]
+    pub body_features: Option<super::types::FeatureRefList>,
     /// How much larger than the bodies on every side. Default: 0.
     #[serde(default)]
     pub margin: Option<LengthExpr>,
@@ -619,12 +634,42 @@ pub struct BoundingSolidParams {
     pub common: FeatureCommon,
 }
 
+fn bodies_or_features_required(schema: &mut Schema) {
+    schema.insert("anyOf".into(), json!([{"required": ["bodies"]}, {"required": ["body_features"]}]));
+}
+
+fn tools_or_features_required(schema: &mut Schema) {
+    schema.insert("anyOf".into(), json!([{"required": ["tools"]}, {"required": ["tool_features"]}]));
+}
+
+#[derive(Debug, Deserialize)]
+struct ScaleParamsRaw {
+    #[serde(default, deserialize_with = "scale_bodies_opt")]
+    bodies: Option<StringList>,
+    #[serde(default, deserialize_with = "feature_refs_non_empty")]
+    body_features: Option<super::types::FeatureRefList<true>>,
+    #[serde(default)]
+    factor: Option<NumberExpr>,
+    #[serde(default)]
+    factors: Option<ScaleFactors>,
+    #[serde(default)]
+    origin: Option<Point3>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    participants: Option<StringList>,
+}
+
 /// Scale bodies about a point.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
+#[derive(Debug, JsonSchema)]
+#[schemars(deny_unknown_fields, transform = bodies_or_features_required)]
 pub struct ScaleParams {
     /// The bodies to scale.
-    pub bodies: StringList,
+    #[serde(default)]
+    pub bodies: Option<StringList>,
+    /// Upstream features whose live created bodies are scaled.
+    #[serde(default)]
+    pub body_features: Option<super::types::FeatureRefList<true>>,
     /// The same factor in every direction, above 1e-9 and below 1e6. Give it or `factors`.
     #[serde(default)]
     pub factor: Option<NumberExpr>,
@@ -646,18 +691,71 @@ pub struct ScaleParams {
     pub participants: Option<StringList>,
 }
 
+impl<'de> Deserialize<'de> for ScaleParams {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = ScaleParamsRaw::deserialize(d)?;
+        if r.bodies.is_none() && r.body_features.is_none() {
+            return Err(D::Error::custom(whole("`bodies` must list bodies")));
+        }
+        Ok(ScaleParams {
+            bodies: r.bodies,
+            body_features: r.body_features,
+            factor: r.factor,
+            factors: r.factors,
+            origin: r.origin,
+            name: r.name,
+            participants: r.participants,
+        })
+    }
+}
+
+fn scale_bodies_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<StringList>, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Null => Err(D::Error::custom(whole("`bodies` must list bodies"))),
+        v => StringList::deserialize(v).map(Some).map_err(D::Error::custom),
+    }
+}
+
+fn feature_refs_non_empty<'de, D: Deserializer<'de>>(d: D) -> Result<Option<super::types::FeatureRefList<true>>, D::Error> {
+    super::types::FeatureRefList::<true>::deserialize(d).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+struct CombineParamsRaw {
+    #[serde(deserialize_with = "target_body")]
+    target: String,
+    #[serde(default, deserialize_with = "tool_bodies_opt")]
+    tools: Option<NameList>,
+    #[serde(default, deserialize_with = "feature_refs_non_empty")]
+    tool_features: Option<super::types::FeatureRefList<true>>,
+    #[serde(default)]
+    operation: Option<CombineOperation>,
+    #[serde(default)]
+    touching: Option<TouchingParam>,
+    #[serde(default)]
+    keep_tools: Option<bool>,
+    #[serde(default)]
+    new_component: Option<bool>,
+    #[serde(default)]
+    component_name: Option<String>,
+    #[serde(flatten, deserialize_with = "feature_common")]
+    common: FeatureCommon,
+}
+
 /// Combine bodies: join the tool bodies to the target, cut them from it, or keep only the space
 /// the target shares with them. Whether each body exists stays the handler's to check.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
+#[derive(Debug, JsonSchema)]
+#[schemars(deny_unknown_fields, transform = tools_or_features_required)]
 pub struct CombineParams {
     /// The body the tools combine with, by name.
-    #[serde(deserialize_with = "target_body")]
     #[schemars(with = "String")]
     pub target: String,
-    #[serde(deserialize_with = "tool_bodies")]
+    #[serde(default)]
     #[schemars(schema_with = "tool_bodies_schema")]
-    pub tools: NameList,
+    pub tools: Option<NameList>,
+    /// Upstream features whose live created bodies are dynamically combined as tools.
+    #[serde(default)]
+    pub tool_features: Option<super::types::FeatureRefList<true>>,
     /// What the tools do to the target. Default: join.
     #[serde(default)]
     pub operation: Option<CombineOperation>,
@@ -674,8 +772,28 @@ pub struct CombineParams {
     /// " Combined".
     #[serde(default)]
     pub component_name: Option<String>,
-    #[serde(flatten, deserialize_with = "feature_common")]
+    #[serde(flatten)]
     pub common: FeatureCommon,
+}
+
+impl<'de> Deserialize<'de> for CombineParams {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = CombineParamsRaw::deserialize(d)?;
+        if r.tools.is_none() && r.tool_features.is_none() {
+            return Err(D::Error::custom(whole(NO_TOOLS)));
+        }
+        Ok(CombineParams {
+            target: r.target,
+            tools: r.tools,
+            tool_features: r.tool_features,
+            operation: r.operation,
+            touching: r.touching,
+            keep_tools: r.keep_tools,
+            new_component: r.new_component,
+            component_name: r.component_name,
+            common: r.common,
+        })
+    }
 }
 
 /// `target`: a body name, with the handler's message for anything else, `null` included.
@@ -739,12 +857,12 @@ const NO_TOOLS: &str = "`tools` must list bodies";
 /// `tools`: a name or a list of names, as `params::string_list` reads it and with its messages,
 /// and at least one. An empty list, and `null` (which the reader reads as none), get the
 /// handler's message for no tools.
-fn tool_bodies<'de, D: Deserializer<'de>>(d: D) -> Result<NameList, D::Error> {
+fn tool_bodies_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NameList>, D::Error> {
     match Value::deserialize(d)? {
         Value::Null => Err(D::Error::custom(whole(NO_TOOLS))),
         v => match NameList::deserialize(v).map_err(D::Error::custom)? {
             NameList(names) if names.is_empty() => Err(D::Error::custom(whole(NO_TOOLS))),
-            names => Ok(names),
+            names => Ok(Some(names)),
         },
     }
 }
@@ -1121,6 +1239,9 @@ pub struct MoveParams {
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     #[schemars(with = "StringList")]
     pub bodies: Option<StringList>,
+    /// Upstream features whose live created bodies are moved or copied.
+    #[serde(default)]
+    pub body_features: Option<super::types::FeatureRefList>,
     /// Component occurrence paths, root first, to copy independently. Requires `copy: true`.
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Vec<Vec<u64>>")]

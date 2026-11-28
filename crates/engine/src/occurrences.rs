@@ -1068,8 +1068,14 @@ impl Session {
         let shown = self.model.state();
         let mut removed = std::collections::BTreeSet::new();
         for feature in self.doc.features.iter().skip(marker).filter(|f| !f.suppressed) {
-            if let FeatureKind::Remove { bodies } = &feature.kind {
+            if let FeatureKind::Remove { bodies, body_features } = &feature.kind {
                 removed.extend(bodies.iter().filter(|b| !kept.contains(b.0.as_str()) && shown.body(&b.0).is_some()).map(|b| b.0.clone()));
+                for fid in body_features {
+                    if self.doc.feature(fid.0).is_some_and(|f| f.suppressed) {
+                        continue;
+                    }
+                    removed.extend(shown.feature_body_names(fid.0).into_iter().filter(|name| !kept.contains(name)).map(str::to_string));
+                }
             }
         }
         if removed.is_empty() || self.doc.occurrences.is_empty() {

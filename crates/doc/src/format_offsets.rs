@@ -467,6 +467,7 @@ mod tests {
                 .add_feature(
                     FeatureKind::Extrude {
                         thin: None,
+                        target_features: Vec::new(),
                         sketch: crate::SketchId(if missing_sketch { 999_999 } else { id }),
                         profiles: ProfileSel::OffsetBoundaries { associations: vec!["deleted-o1".into()] },
                         extent: crate::Extent {

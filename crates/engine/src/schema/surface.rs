@@ -99,7 +99,7 @@ fn bodies_schema(_: &mut SchemaGenerator) -> Schema {
 }
 
 fn bodies_required(schema: &mut Schema) {
-    require(schema, "bodies");
+    schema.insert("anyOf".into(), json!([{"required": ["bodies"]}, {"required": ["body_features"]}]));
 }
 
 /// Sew surface bodies into the first one along the edges they share; a solid when they close. One
@@ -112,6 +112,9 @@ pub struct StitchParams {
     #[serde(default, deserialize_with = "surface_bodies")]
     #[schemars(schema_with = "bodies_schema")]
     pub bodies: Option<NameList>,
+    /// Upstream features whose live created surface bodies are stitched.
+    #[serde(default)]
+    pub body_features: Option<super::types::FeatureRefList<true>>,
     /// How far apart two edges may be and still be sewn together. Default: 0, edges that meet.
     #[serde(default)]
     pub tolerance: Option<LengthExpr>,
@@ -157,6 +160,9 @@ pub struct ThickenParams {
     #[serde(default, deserialize_with = "surface_bodies")]
     #[schemars(schema_with = "bodies_schema")]
     pub bodies: Option<NameList>,
+    /// Upstream features whose live created surface bodies are thickened.
+    #[serde(default)]
+    pub body_features: Option<super::types::FeatureRefList<true>>,
     /// How thick, along each surface's normal; negative: against it.
     pub thickness: LengthExpr,
     /// True: half the thickness each side of the surface. Default: false.
@@ -169,6 +175,9 @@ pub struct ThickenParams {
     /// component.
     #[serde(default)]
     pub targets: Option<NameList>,
+    /// Upstream features whose live created bodies take part in a join, cut or intersect.
+    #[serde(default)]
+    pub target_features: Option<super::types::FeatureRefList>,
     /// What a join makes of pieces that share no face. Default: separate.
     #[serde(default)]
     pub touching: Option<TouchingParam>,

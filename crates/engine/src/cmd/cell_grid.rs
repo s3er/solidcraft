@@ -175,6 +175,7 @@ fn cell_grid(s: &mut Session, p: &Value) -> Result<Value> {
         Some(o) => return Err(bad(cmd, format!("unknown direction `{o}`"))),
     };
     let targets = string_list(cmd, p, "targets")?;
+    let target_features = super::features::feature_body_refs(s, p, "target_features", cmd)?;
     let profiles = if p.get("profiles").is_none() { default_extrude_profiles(s, sketch) } else { profiles(p, cmd)? };
     add_feature(
         s,
@@ -198,6 +199,7 @@ fn cell_grid(s: &mut Session, p: &Value) -> Result<Value> {
             through_all,
             direction,
             targets: targets.into_iter().map(BodyName).collect(),
+            target_features,
         },
     )
 }

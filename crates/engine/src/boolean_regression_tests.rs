@@ -2498,3 +2498,171 @@ fn a_hole_in_a_notched_cross_cut_large_half_torus_is_cut() {
     let got = volume(&s, "Part");
     assert!((got - want).abs() < 5e-5, "volume {got}, want {want} (notch {notch}, cross {cross}, holes {holes})");
 }
+
+/// Dynamic feature-body selection on `solid.combine`: selecting a `Pattern` feature in
+/// `tool_features` automatically catches new bodies when the pattern count grows, drops them
+/// cleanly when the count shrinks (down to 1), and skips the feature with a warning when
+/// suppressed.
+#[test]
+fn combine_with_pattern_tool_feature_tracks_count_changes_and_suppression() {
+    let mut s = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
+    s.execute("parameters.add", &json!({"name": "n", "expression": "3", "unit": ""})).unwrap();
+    s.execute("solid.box", &json!({"length": 120, "width": 20, "height": 10, "corner": [0, 0, 0], "body_name": "Base"})).unwrap();
+    s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [5, 5, 10], "operation": "new", "body_name": "Boss"})).unwrap();
+    let pat = s
+        .execute("solid.pattern.rectangular", &json!({"bodies": ["Boss"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 20, "name": "BossPattern"}))
+        .unwrap();
+    let pat_id = pat["feature"].as_u64().unwrap();
+    assert_eq!(s.model.state().bodies.len(), 4, "Base + Boss + 2 pattern copies");
+
+    s.execute("solid.combine", &json!({"target": "Base", "tools": ["Boss"], "tool_features": ["BossPattern"], "operation": "join"})).unwrap();
+    assert_eq!(s.model.state().bodies.len(), 1, "all patterned copies are joined into Base");
+    assert!((volume(&s, "Base") - 27_000.0).abs() < 1e-3, "120*20*10 + 3*1000 = 27000, got {}", volume(&s, "Base"));
+
+    // Increasing pattern count automatically catches the new bodies.
+    s.execute("parameters.change", &json!({"name": "n", "expression": "5"})).unwrap();
+    assert_eq!(s.model.state().bodies.len(), 1, "all 5 bosses joined into Base");
+    assert!((volume(&s, "Base") - 29_000.0).abs() < 1e-3, "24000 + 5*1000 = 29000, got {}", volume(&s, "Base"));
+
+    // Decreasing count to 1 leaves 0 pattern copy bodies: Combine still succeeds with only the seed boss.
+    s.execute("parameters.change", &json!({"name": "n", "expression": "1"})).unwrap();
+    assert_eq!(s.model.state().bodies.len(), 1);
+    assert!((volume(&s, "Base") - 25_000.0).abs() < 1e-3, "24000 + 1*1000 = 25000, got {}", volume(&s, "Base"));
+
+    // Suppressing and unsuppressing the pattern feature updates the combine cleanly.
+    s.execute("parameters.change", &json!({"name": "n", "expression": "4"})).unwrap();
+    assert!((volume(&s, "Base") - 28_000.0).abs() < 1e-3);
+    s.execute("timeline.suppress", &json!({"feature": pat_id, "suppressed": true})).unwrap();
+    assert_eq!(s.model.state().bodies.len(), 1);
+    assert!((volume(&s, "Base") - 25_000.0).abs() < 1e-3, "suppressed pattern leaves only seed boss");
+    s.execute("timeline.suppress", &json!({"feature": pat_id, "suppressed": false})).unwrap();
+    assert_eq!(s.model.state().bodies.len(), 1);
+    assert!((volume(&s, "Base") - 28_000.0).abs() < 1e-3, "unsuppressed pattern rejoins copies");
+
+    // Save/load JSON round-trip preserves `tool_features` and rebuilds identically.
+    let saved = serde_json::to_string(&*s.doc).unwrap();
+    let reloaded_doc: solidcraft_doc::Document = serde_json::from_str(&saved).unwrap();
+    let mut s_reloaded = Session::default();
+    s_reloaded.set_doc(reloaded_doc);
+    s_reloaded.model.evaluate(&s_reloaded.doc);
+    assert_eq!(s_reloaded.model.state().bodies.len(), 1);
+    assert!((volume(&s_reloaded, "Base") - 28_000.0).abs() < 1e-3);
+}
+
+/// Dynamic feature-body selection works across `solid.move`, `solid.scale`, `solid.remove`,
+/// `solid.bounding_solid`, `solid.align`, `solid.extrude` (`target_features`), and `surface.thicken`
+/// when an upstream pattern's count changes.
+#[test]
+fn feature_body_selection_works_across_multi_body_commands_and_targets() {
+    // 1. Scale + Move + BoundingSolid + Remove driven by a Pattern feature.
+    let mut s = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
+    s.execute("parameters.add", &json!({"name": "n", "expression": "3", "unit": ""})).unwrap();
+    s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, 0], "body_name": "Seed"})).unwrap();
+    let pat = s
+        .execute("solid.pattern.rectangular", &json!({"bodies": ["Seed"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 25, "name": "Pat"}))
+        .unwrap();
+    let pat_id = pat["feature"].as_u64().unwrap();
+    // Scale only the patterned copies by 2x along Z (each becomes 10*10*20 = 2000 mm^3).
+    s.execute("solid.scale", &json!({"body_features": [pat_id], "factors": [1, 1, 2]})).unwrap();
+    // Move the patterned copies +5 in Y.
+    s.execute("solid.move", &json!({"body_features": [pat_id], "translate": [0, 5, 0]})).unwrap();
+    // Bounding solid around the patterned copies alone.
+    s.execute("solid.bounding_solid", &json!({"body_features": [pat_id], "body_name": "PatBounds"})).unwrap();
+    let total_pat_vol = |s: &Session| -> f64 { s.model.state().bodies.iter().filter(|b| b.feature == pat_id).map(|b| volume(s, &b.name)).sum() };
+    assert!((total_pat_vol(&s) - 4_000.0).abs() < 1e-3, "2 copies * 2000 = 4000");
+    assert!((volume(&s, "Seed") - 1_000.0).abs() < 1e-3, "Seed untouched");
+    // Bounds cover copies at x=[25..35] and x=[50..60] => length 35, y=[5..15] => width 10, z=[0..20] => height 20 => 7000.
+    assert!((volume(&s, "PatBounds") - 7_000.0).abs() < 1e-1, "bounds vol {}", volume(&s, "PatBounds"));
+
+    // Grow pattern count from 3 to 4: Scale, Move, and BoundingSolid all catch the 3rd copy!
+    s.execute("parameters.change", &json!({"name": "n", "expression": "4"})).unwrap();
+    assert!((total_pat_vol(&s) - 6_000.0).abs() < 1e-3, "3 copies * 2000 = 6000");
+    // Bounds now span x=[25..85] => length 60, width 10, height 20 => 12000.
+    assert!((volume(&s, "PatBounds") - 12_000.0).abs() < 1e-1, "grown bounds vol {}", volume(&s, "PatBounds"));
+
+    // Remove all patterned copies dynamically via `body_features`.
+    s.execute("solid.remove", &json!({"body_features": [pat_id]})).unwrap();
+    assert_eq!(s.model.state().bodies.iter().filter(|b| b.feature == pat_id).count(), 0);
+    assert!(s.model.state().body("Seed").is_some());
+
+    // 2. Extrude Cut with `target_features`: cuts every body created by the pattern while leaving
+    //    an unrelated body overlapping the same cut volume untouched!
+    let mut s2 = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
+    s2.execute("parameters.add", &json!({"name": "n", "expression": "3", "unit": ""})).unwrap();
+    s2.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, 0], "body_name": "Seed"})).unwrap();
+    let pat2 = s2
+        .execute("solid.pattern.rectangular", &json!({"bodies": ["Seed"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 20, "name": "Row"}))
+        .unwrap();
+    let pat2_id = pat2["feature"].as_u64().unwrap();
+    // Unrelated body sitting in the exact same cut corridor.
+    s2.execute("solid.box", &json!({"length": 100, "width": 4, "height": 10, "corner": [0, 3, 0], "operation": "new", "body_name": "KeepMe"}))
+        .unwrap();
+    s2.execute("sketch.create", &json!({"plane": "XY"})).unwrap();
+    s2.execute("sketch.rectangle.two_point", &json!({"p0": [0, 3], "p1": [100, 7]})).unwrap();
+    s2.execute("sketch.finish", &json!({})).unwrap();
+    s2.execute("solid.extrude", &json!({"distance": 5, "operation": "cut", "target_features": [pat2_id]})).unwrap();
+    // Each copy loses a 10 * 4 * 5 = 200 mm^3 slot (remaining 800 each), while Seed and KeepMe stay intact.
+    assert!((volume(&s2, "Seed") - 1_000.0).abs() < 1e-3);
+    assert!((volume(&s2, "KeepMe") - 4_000.0).abs() < 1e-3);
+    let copy_vols =
+        |s: &Session| -> Vec<f64> { s.model.state().bodies.iter().filter(|b| b.feature == pat2_id).map(|b| volume(s, &b.name)).collect() };
+    let v3 = copy_vols(&s2);
+    assert_eq!(v3.len(), 2);
+    assert!(v3.iter().all(|v| (*v - 800.0).abs() < 1e-3), "{v3:?}");
+    // Increase count to 4: the newly added 3rd copy is also cut automatically!
+    s2.execute("parameters.change", &json!({"name": "n", "expression": "4"})).unwrap();
+    let v4 = copy_vols(&s2);
+    assert_eq!(v4.len(), 3);
+    assert!(v4.iter().all(|v| (*v - 800.0).abs() < 1e-3), "{v4:?}");
+    // Decrease count to 1 (0 copy bodies): cut does NOT fall back to cutting Seed or KeepMe!
+    s2.execute("parameters.change", &json!({"name": "n", "expression": "1"})).unwrap();
+    assert!((volume(&s2, "Seed") - 1_000.0).abs() < 1e-3);
+    assert!((volume(&s2, "KeepMe") - 4_000.0).abs() < 1e-3);
+
+    // 3. Align via `body_features` and surface Thicken via `body_features`.
+    let mut s3 = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
+    s3.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, 0], "body_name": "A"})).unwrap();
+    let p3 = s3.execute("solid.pattern.rectangular", &json!({"bodies": ["A"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 20})).unwrap();
+    let p3_id = p3["feature"].as_u64().unwrap();
+    s3.execute("solid.align", &json!({"body_features": [p3_id], "from": [20, 0, 0], "to": [20, 10, 0]})).unwrap();
+    let moved_copy = s3.model.state().bodies.iter().find(|b| b.feature == p3_id).unwrap().clone();
+    let bb = moved_copy.mesh().bounds();
+    assert!((bb.min.y - 10.0).abs() < 1e-3, "aligned copy shifted to y=10, got {bb:?}");
+
+    // 4. Modifying features (Combine, Shell, Move) can themselves be selected as `body_features`
+    //    inputs, and downstream features update automatically when their upstream inputs change.
+    let mut s4 = Session { param_check: crate::schema::ParamCheck::Strict, ..Session::default() };
+    s4.execute("parameters.add", &json!({"name": "n", "expression": "3", "unit": ""})).unwrap();
+    s4.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10, "corner": [0, 0, 0], "body_name": "Base"})).unwrap();
+    s4.execute(
+        "solid.box",
+        &json!({"length": 10, "width": 10, "height": 10, "corner": [8, 0, 0], "operation": "new", "body_name": "Tab"}),
+    )
+    .unwrap();
+    let pat4 = s4
+        .execute("solid.pattern.rectangular", &json!({"bodies": ["Tab"], "dir1": [1, 0, 0], "count1": "n", "spacing1": 8, "name": "Tabs"}))
+        .unwrap();
+    let pat4_id = pat4["feature"].as_u64().unwrap();
+    let comb4 = s4
+        .execute("solid.combine", &json!({"target": "Base", "tools": ["Tab"], "tool_features": [pat4_id], "operation": "join", "name": "Combine1"}))
+        .unwrap();
+    let comb4_id = comb4["feature"].as_u64().unwrap();
+    // Move driven by `Combine1` (a modifying feature whose output body kept `Base`'s creator id).
+    let mv4 = s4.execute("solid.move", &json!({"body_features": [comb4_id], "translate": [0, 20, 0], "name": "Move1"})).unwrap();
+    let mv4_id = mv4["feature"].as_u64().unwrap();
+    assert!(s4.model.result(mv4_id).and_then(|r| r.warning.as_ref()).is_none(), "Move1 should resolve Combine1 without warning");
+    let bb1 = s4.model.state().body("Base").unwrap().mesh().bounds();
+    assert!((bb1.min.y - 20.0).abs() < 1e-3 && (bb1.max.x - 34.0).abs() < 1e-3, "got {bb1:?}");
+    // Shell on `Base`, then Scale driven by `Shell1` (another modifying feature).
+    let sh4 = s4.execute("solid.shell", &json!({"body": "Base", "thickness": 1.0, "faces": [[5, 25, 10]], "name": "Shell1"})).unwrap();
+    let sh4_id = sh4["feature"].as_u64().unwrap();
+    let sc4 = s4.execute("solid.scale", &json!({"body_features": [sh4_id], "factors": [1, 1, 2], "name": "Scale1"})).unwrap();
+    let sc4_id = sc4["feature"].as_u64().unwrap();
+    assert!(s4.model.result(sc4_id).and_then(|r| r.warning.as_ref()).is_none(), "Scale1 should resolve Shell1 without warning");
+    assert!((s4.model.state().body("Base").unwrap().mesh().bounds().max.z - 20.0).abs() < 1e-3);
+
+    // Changing upstream pattern count from 3 to 5 updates Combine1 -> Move1 -> Shell1 -> Scale1!
+    s4.execute("parameters.change", &json!({"name": "n", "expression": "5"})).unwrap();
+    let bb2 = s4.model.state().body("Base").unwrap().mesh().bounds();
+    assert!((bb2.min.y - 20.0).abs() < 1e-3 && (bb2.max.x - 50.0).abs() < 1e-3 && (bb2.max.z - 20.0).abs() < 1e-3, "got {bb2:?}");
+}

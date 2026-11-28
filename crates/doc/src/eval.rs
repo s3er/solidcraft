@@ -1144,6 +1144,11 @@ pub struct ModelState {
     /// its sketch plane and the interval along the plane's normal it ran over. A pocket it leaves
     /// is as deep as the extrude ran from the panel's face (see `sheet_surface_cuts`).
     cut_extents: BTreeMap<u64, (Plane, (f64, f64))>,
+    /// Live non-envelope body names created or modified by each feature in this evaluation (by
+    /// feature id), in model order. Populated by [`ModelState::stamp`] so dynamic feature-body
+    /// selection works for every body-creating or body-modifying feature (Combine, Shell, Fillet,
+    /// Move, Pattern, etc.).
+    feature_bodies: BTreeMap<u64, Vec<String>>,
 }
 
 /// How a piece a join split off into a body of its own (`Touching::Separate`) touched the
@@ -1204,6 +1209,7 @@ impl ModelState {
             pattern_left_out,
             legacy_picks,
             cut_extents,
+            feature_bodies,
         } = self;
         ModelState {
             frame_bodies: frame_bodies.clone(),
@@ -1224,7 +1230,37 @@ impl ModelState {
             pattern_left_out: pattern_left_out.clone(),
             legacy_picks: legacy_picks.clone(),
             cut_extents: cut_extents.clone(),
+            feature_bodies: feature_bodies.clone(),
         }
+    }
+
+    /// Live (non-envelope) body names belonging to `feature_id`: every body created or modified
+    /// by `feature_id` (falling back to `b.feature == feature_id` for saved states without
+    /// `feature_bodies`), filtered to bodies still live in `self` (also matching placed copies
+    /// whose `source_name` matches a recorded body).
+    pub fn feature_body_names(&self, feature_id: u64) -> Vec<&str> {
+        let mut out = Vec::new();
+        if let Some(names) = self.feature_bodies.get(&feature_id) {
+            for b in &self.bodies {
+                if !b.envelope
+                    && names.iter().any(|n| n == &b.name || b.source_name.as_deref() == Some(n.as_str()))
+                    && !out.contains(&b.name.as_str())
+                {
+                    out.push(b.name.as_str());
+                }
+            }
+        }
+        for b in &self.bodies {
+            if b.feature == feature_id && !b.envelope && !out.contains(&b.name.as_str()) {
+                out.push(b.name.as_str());
+            }
+        }
+        out
+    }
+
+    /// Whether `body_name` is a live (non-envelope) body belonging to `feature_id`.
+    pub fn feature_has_body(&self, feature_id: u64, body_name: &str) -> bool {
+        self.feature_body_names(feature_id).contains(&body_name)
     }
 
     /// How many joint origins have been resolved from the bodies of this model (and its copies),
@@ -1336,6 +1372,7 @@ impl ModelState {
         for old in &before.bodies {
             by_name.entry(old.name.as_str()).or_default().push(old);
         }
+        let mut touched: Vec<String> = Vec::new();
         for b in &mut self.bodies {
             let olds: &[&ModelBody] = by_name.get(b.name.as_str()).map(Vec::as_slice).unwrap_or_default();
             if !matches!(f.kind, FeatureKind::BodyTransfer { .. })
@@ -1351,8 +1388,14 @@ impl ModelState {
                     b.key = x.key;
                     b.names = x.names.clone();
                     b.bytes = if x.bytes > 0 { x.bytes } else { b.body.retained_bytes() };
+                    if b.feature == feature && !b.envelope && !touched.contains(&b.name) {
+                        touched.push(b.name.clone());
+                    }
                 }
                 None => {
+                    if !b.envelope && !touched.contains(&b.name) {
+                        touched.push(b.name.clone());
+                    }
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     (key, &b.name).hash(&mut h);
                     b.key = h.finish();
@@ -1377,6 +1420,48 @@ impl ModelState {
                     b.bytes = b.body.retained_bytes();
                 }
             }
+        }
+        // Keep the target bodies of no-op modifying features (e.g. a Combine whose dynamic
+        // `tool_features` resolved to 0 tools, or an identity Move/Scale/Align) associated with
+        // the feature so downstream feature-body selections stay intact when upstream counts shrink.
+        if touched.is_empty() {
+            match &f.kind {
+                FeatureKind::Combine { target, .. } => {
+                    if let Some(b) = self.body(&target.0)
+                        && !b.envelope
+                    {
+                        touched.push(b.name.clone());
+                    }
+                }
+                FeatureKind::Move { bodies, body_features, copy: false, .. }
+                | FeatureKind::Scale { bodies, body_features, .. }
+                | FeatureKind::Align { bodies, body_features, .. } => {
+                    for name in bodies {
+                        if let Some(b) = self.body(&name.0)
+                            && !b.envelope
+                            && !touched.contains(&b.name)
+                        {
+                            touched.push(b.name.clone());
+                        }
+                    }
+                    for id in body_features {
+                        for name in before.feature_body_names(id.0) {
+                            if let Some(b) = self.body(name)
+                                && !b.envelope
+                                && !touched.contains(&b.name)
+                            {
+                                touched.push(b.name.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if touched.is_empty() {
+            self.feature_bodies.remove(&feature);
+        } else {
+            self.feature_bodies.insert(feature, touched);
         }
         // Later features read a sketch's solved geometry: they are keyed by it (to the
         // quantum), so a value set back that solves to the same geometry reuses their results.
@@ -2619,8 +2704,9 @@ fn cache_key(f: &Feature, chain_fp: u64, local: u64, ctx: u64, state: &ModelStat
         FeatureKind::Pattern { features, .. } | FeatureKind::Mirror { features, .. } => !features.is_empty(),
         _ => false,
     };
-    if replays {
+    if replays || f.kind.has_feature_body_inputs() {
         chain_fp.hash(&mut h);
+        state.feature_bodies.hash(&mut h);
     }
     h.finish()
 }
@@ -2955,7 +3041,7 @@ impl Feature {
         // A sheet's record (its surfaces, bends, cuts and pockets) is not carried by a replayed
         // change, only its body: with sheets in the design, every feature is evaluated again
         // (#6748, as the flat model's sheets were).
-        if !st.surface_sheets.is_empty() || faces_by_name || (!blend && !by_name(self)) {
+        if !st.surface_sheets.is_empty() || faces_by_name || (!blend && !by_name(self)) || self.kind.has_feature_body_inputs() {
             return None;
         }
         let named = |names: &[String]| -> Option<Vec<usize>> {
@@ -2994,8 +3080,9 @@ impl Feature {
             FeatureKind::Pattern { features, pattern, .. } if !features.is_empty() && fixed_pattern(pattern) => {
                 let mut read = Vec::new();
                 for id in features {
-                    let src =
-                        source_feature(doc, *id).ok().filter(|src| numeric_tool(&src.kind) && hole_references(src).is_empty() && by_name(src))?;
+                    let src = source_feature(doc, *id).ok().filter(|src| {
+                        numeric_tool(&src.kind) && hole_references(src).is_empty() && by_name(src) && !src.kind.has_feature_body_inputs()
+                    })?;
                     // As `replay` picks them: the source's targets, else its participants.
                     let (op, targets) = feature_op(src);
                     let targets = if targets.is_empty() { src.participants.clone() } else { targets };
@@ -3109,6 +3196,7 @@ impl ModelState {
             && others_same(&self.kept_separate, &before.kept_separate, feature)
             && others_same(&self.pattern_left_out, &before.pattern_left_out, feature)
             && others_same(&self.named_faces, &before.named_faces, feature)
+            && others_same(&self.feature_bodies, &before.feature_bodies, feature)
             && serde_json::to_string(&self.threads).ok() == serde_json::to_string(&before.threads).ok();
         if !same_rest {
             return None;
@@ -3579,7 +3667,7 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
         // moving a part inside it builds it again, moving the component does not.
         FeatureKind::BoundingSolid { contents: true, .. } => return contents_digest(doc, f, st),
         // A combine moves tools placed differently from its target into the target's frame (#3383).
-        FeatureKind::Combine { target, tools, .. } => {
+        FeatureKind::Combine { target, tools, tool_features, .. } => {
             frame = st.and_then(|st| st.body(target)).map(|b| body_world(doc, b));
             reads.placed_body(st, target);
             // A tool from a further placement (`Bit (Drill:2)`) is read through its occurrence
@@ -3589,6 +3677,13 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
                 match copies.get(&**tool) {
                     Some(path) => reads.paths.push(path.clone()),
                     None => reads.placed_body(st, tool),
+                }
+            }
+            if let Some(st) = st {
+                for id in tool_features {
+                    for name in st.feature_body_names(id.0) {
+                        reads.placed_body(Some(st), name);
+                    }
                 }
             }
         }
@@ -5806,13 +5901,83 @@ thread_local! {
 fn joined_into<'d>(doc: &'d Document, state: &ModelState, f: &Feature, name: &str) -> Option<&'d str> {
     let mut now: Option<&'d str> = None;
     for g in doc.features.iter().take_while(|g| g.id != f.id).filter(|g| !g.suppressed) {
-        if let FeatureKind::Combine { target, tools, operation: Operation::Join | Operation::NewBody, keep_tools: false } = &g.kind
-            && tools.iter().any(|t| t.0.as_str() == now.unwrap_or(name))
-        {
-            now = Some(target.0.as_str());
+        if let FeatureKind::Combine { target, tools, tool_features, operation: Operation::Join | Operation::NewBody, keep_tools: false } = &g.kind {
+            let current = now.unwrap_or(name);
+            let by_name = tools.iter().any(|t| t.0.as_str() == current);
+            let by_feature = !tool_features.is_empty()
+                && doc
+                    .features
+                    .iter()
+                    .take_while(|h| h.id != g.id)
+                    .any(|h| tool_features.iter().any(|id| id.0 == h.id) && h.body_names.iter().any(|n| n.trim() == current));
+            if by_name || by_feature {
+                now = Some(target.0.as_str());
+            }
         }
     }
     now.filter(|b| state.body(b).is_some())
+}
+
+/// Resolve explicit body names together with every live (non-envelope) body created by
+/// `features` (in model order), deduplicating by body name.
+pub(super) fn resolve_body_inputs(
+    doc: &Document,
+    st: &ModelState,
+    f: &Feature,
+    explicit: &[crate::BodyName],
+    features: &[FeatureId],
+    warning: &mut Option<String>,
+) -> Result<Vec<crate::BodyName>> {
+    let mut out = Vec::with_capacity(explicit.len() + features.len());
+    for name in explicit {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    let in_doc = doc.features.iter().any(|g| g.id == f.id);
+    for id in features {
+        let Some(src) = doc.feature(id.0) else {
+            return Err(DocError::Unknown(format!("feature `{id}`")));
+        };
+        let before = !in_doc || doc.features.iter().take_while(|g| g.id != f.id).any(|g| g.id == id.0);
+        if !before {
+            return Err(DocError::Invalid(format!("feature `{}` must come before `{}` in the timeline", src.name, f.name)));
+        }
+        if src.suppressed {
+            append_warning(warning, format!("`{}` is left out: the feature is suppressed", src.name));
+            continue;
+        }
+        let mut found = false;
+        for name in st.feature_body_names(src.id) {
+            let name = crate::BodyName(name.to_string());
+            if !out.contains(&name) {
+                out.push(name);
+            }
+            found = true;
+        }
+        if !found {
+            append_warning(warning, format!("`{}` currently has no bodies", src.name));
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve boolean target body names plus dynamic `target_features`.
+/// Returns `Ok(None)` when `target_features` is non-empty and resolved to zero live bodies,
+/// so the caller does not fall back to targeting every body in the component.
+pub(super) fn resolve_target_inputs(
+    doc: &Document,
+    st: &ModelState,
+    f: &Feature,
+    targets: &[crate::BodyName],
+    target_features: &[FeatureId],
+    warning: &mut Option<String>,
+) -> Result<Option<Vec<String>>> {
+    if target_features.is_empty() {
+        return Ok(Some(crate::plain(targets)));
+    }
+    let resolved = resolve_body_inputs(doc, st, f, targets, target_features, warning)?;
+    if resolved.is_empty() { Ok(None) } else { Ok(Some(crate::plain(&resolved))) }
 }
 
 /// The body a feature's target name `name` picks. Body names are unique, so a body of the
@@ -6037,7 +6202,10 @@ fn apply_traced_with(
             if let Some(b) = state.bodies.get(i).filter(|b| b.is_surface()) {
                 // Surface targets never block an automatic solid cut or lose faces to it.
                 // Thicken's source surfaces also stay intact for intersects (#17587).
-                if cuts_solids || (!named && matches!(&f.kind, FeatureKind::Thicken { bodies, .. } if bodies.iter().any(|n| *n == b.name))) {
+                if cuts_solids
+                    || (!named
+                        && matches!(&f.kind, FeatureKind::Thicken { bodies, body_features, .. } if bodies.iter().any(|n| *n == b.name) || body_features.iter().any(|id| id.0 == b.feature)))
+                {
                     untouched.insert(i);
                     continue;
                 }
@@ -8680,7 +8848,7 @@ fn feature_tools_with_constructor(
     *to_body = None;
     let unnamed = |bodies: Vec<Body>| -> Vec<Traced> { bodies.into_iter().map(Traced::unnamed).collect() };
     match &f.kind {
-        FeatureKind::Extrude { sketch, profiles, extent, operation, targets, thin } => {
+        FeatureKind::Extrude { sketch, profiles, extent, operation, targets, target_features, thin } => {
             let ss = constructor_profile_in_frame(
                 doc,
                 st.sketch(sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {sketch} (it must come earlier in the timeline)")))?,
@@ -8708,7 +8876,17 @@ fn feature_tools_with_constructor(
                 std::borrow::Cow::Borrowed(st)
             };
             // Through all, and where the tool meets its targets, is measured where they are shown.
-            let shown = targets_as_shown(st, f, &crate::plain(targets))?;
+            let mut shown_targets = crate::plain(targets);
+            for id in target_features {
+                if doc.feature(id.0).is_some_and(|g| !g.suppressed) {
+                    for name in st.feature_body_names(id.0) {
+                        if !shown_targets.iter().any(|s| s == name) {
+                            shown_targets.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            let shown = targets_as_shown(st, f, &shown_targets)?;
             let st: &ModelState = &shown;
             // The face names follow `face_points`: To, then From.
             let name = |k: usize| f.face_names.get(k).map(String::as_str);
@@ -11845,8 +12023,18 @@ fn replay(
 /// `f`'s component has no body for it (#12996), those `f`'s earlier copies made aside: a join's
 /// copies join that component's bodies, as the join did, not new bodies of `f` (#19451).
 fn copy_targets<'a>(st: &ModelState, f: &'a Feature, src: &Feature) -> (Operation, Vec<String>, std::borrow::Cow<'a, Feature>) {
-    let (op, targets) = feature_op(src);
-    let targets = if targets.is_empty() { src.participants.clone() } else { targets };
+    let (op, mut targets) = feature_op(src);
+    let tf = src.kind.target_features();
+    if !tf.is_empty() {
+        for id in tf {
+            for name in st.feature_body_names(id.0) {
+                if !targets.iter().any(|s| s == name) {
+                    targets.push(name.to_string());
+                }
+            }
+        }
+    }
+    let targets = if targets.is_empty() && tf.is_empty() { src.participants.clone() } else { targets };
     let own = matches!(op, Operation::Join | Operation::Cut | Operation::Intersect)
         && targets.is_empty()
         && f.participants.is_empty()
@@ -13201,13 +13389,27 @@ fn eval_feature_kind(
         | FeatureKind::Align { .. }
         | FeatureKind::Remove { .. } => more::eval(doc, vals, f, st, warning),
         FeatureKind::Sketch { plane, sketch } => eval_sketch(doc, vals, f, plane, sketch, st, warning, crate::project::LostNames::Fail),
-        FeatureKind::Extrude { operation, targets, .. }
-        | FeatureKind::Pipe { operation, targets, .. }
-        | FeatureKind::Revolve { operation, targets, .. }
-        | FeatureKind::Loft { operation, targets, .. }
-        | FeatureKind::Coil { operation, targets, .. }
-        | FeatureKind::Sweep { operation, targets, .. } => {
-            refuse_ambiguous_targets(doc, st, f, &crate::plain(targets))?;
+        FeatureKind::Extrude { operation, targets, target_features, .. }
+        | FeatureKind::Pipe { operation, targets, target_features, .. }
+        | FeatureKind::Revolve { operation, targets, target_features, .. }
+        | FeatureKind::Loft { operation, targets, target_features, .. }
+        | FeatureKind::Coil { operation, targets, target_features, .. }
+        | FeatureKind::Sweep { operation, targets, target_features, .. } => {
+            let resolved_targets = if *operation == Operation::NewBody {
+                Some(crate::plain(targets))
+            } else {
+                resolve_target_inputs(doc, st, f, targets, target_features, warning)?
+            };
+            let Some(resolved_targets) = resolved_targets else {
+                if *operation == Operation::Join {
+                    let mut constructor = None;
+                    let mut to_body = None;
+                    let tools = feature_tools_with_constructor(doc, vals, f, st, &mut constructor, &mut to_body, warning)?;
+                    return apply_traced_with(doc, st, f, tools, Operation::NewBody, &[], &[]);
+                }
+                return Ok(());
+            };
+            refuse_ambiguous_targets(doc, st, f, &resolved_targets)?;
             let mut constructor = None;
             let mut to_body = None;
             let tools = feature_tools_with_constructor(doc, vals, f, st, &mut constructor, &mut to_body, warning)?;
@@ -13249,9 +13451,9 @@ fn eval_feature_kind(
                 && let Some(c) = &constructor
             {
                 let reach: Vec<_> = tools.iter().map(|t| more::exact_box(&t.body)).collect();
-                more::surface_thin_layer_refused(st, &reach, &c.plane, c.interval, &crate::plain(targets))?;
+                more::surface_thin_layer_refused(st, &reach, &c.plane, c.interval, &resolved_targets)?;
                 if *operation == Operation::Cut {
-                    more::surface_corner_graze_refused(f, st, &crate::plain(targets), c)?;
+                    more::surface_corner_graze_refused(f, st, &resolved_targets, c)?;
                 }
                 st.cut_extents.insert(f.id, (c.plane, c.interval));
             }
@@ -13263,14 +13465,14 @@ fn eval_feature_kind(
                 && !st.surface_sheets.is_empty()
             {
                 let bodies: Vec<Body> = tools.iter().map(|t| t.body.clone()).collect();
-                more::surface_taper_refused(st, &bodies, constructor.as_ref(), &crate::plain(targets), *operation)?;
+                more::surface_taper_refused(st, &bodies, constructor.as_ref(), &resolved_targets, *operation)?;
             }
             // A cut square through flat panels of sheets made from surfaces goes into their outlines.
             if *operation == Operation::Cut && matches!(f.kind, FeatureKind::Extrude { .. }) && !st.surface_sheets.is_empty() {
                 let bodies: Vec<Body> = tools.iter().map(|t| t.body.clone()).collect();
-                let handled = more::surface_prism_cut(f, st, &bodies, &crate::plain(targets), constructor.as_ref())?;
+                let handled = more::surface_prism_cut(f, st, &bodies, &resolved_targets, constructor.as_ref())?;
                 if !handled.is_empty() {
-                    apply_beside_sheet_cut(doc, st, f, tools, *operation, &crate::plain(targets), &handled)?;
+                    apply_beside_sheet_cut(doc, st, f, tools, *operation, &resolved_targets, &handled)?;
                     unchanged(st, warning);
                     return Ok(());
                 }
@@ -13282,28 +13484,35 @@ fn eval_feature_kind(
                 && to_body.is_none()
                 && matches!(f.kind, FeatureKind::Extrude { .. })
                 && !st.surface_sheets.is_empty()
-                && !more::surface_sheet_join(f, st, &crate::plain(targets), constructor.as_ref())?.is_empty()
+                && !more::surface_sheet_join(f, st, &resolved_targets, constructor.as_ref())?.is_empty()
             {
                 return Ok(());
             }
             // A Join extrude to an object joins that object too (#6424): the tool and the body
             // it runs to are one body, not only the body the profile was sketched on.
             let extra: Vec<String> = if *operation == Operation::Join { to_body.into_iter().collect() } else { Vec::new() };
-            apply_traced_with(doc, st, f, tools, *operation, &crate::plain(targets), &extra)?;
+            apply_traced_with(doc, st, f, tools, *operation, &resolved_targets, &extra)?;
             unchanged(st, warning);
             Ok(())
         }
-        FeatureKind::CellGrid { targets, mode, .. } => {
+        FeatureKind::CellGrid { targets, target_features, mode, .. } => {
+            let op = match mode {
+                crate::CellGridMode::Cut => Operation::Cut,
+                crate::CellGridMode::Raised => Operation::Join,
+            };
+            let Some(resolved_targets) = resolve_target_inputs(doc, st, f, targets, target_features, warning)? else {
+                if op == Operation::Join {
+                    let tools = cell_grid::tools(doc, vals, f, st, warning)?;
+                    return apply_traced(doc, st, f, tools, Operation::NewBody, &[]);
+                }
+                return Ok(());
+            };
             let tools = cell_grid::tools(doc, vals, f, st, warning)?;
             // A grid beside the body, or cut the wrong way, changes nothing: say so, as a cut does.
             // Raised cells are joined, as a join extrude's tool is: with no body to join they are
             // a new body, and one that stands inside the body changes nothing, with no warning.
             let before: Vec<Body> = st.bodies.iter().map(|b| b.body.clone()).collect();
-            let op = match mode {
-                crate::CellGridMode::Cut => Operation::Cut,
-                crate::CellGridMode::Raised => Operation::Join,
-            };
-            apply_traced(doc, st, f, tools, op, &crate::plain(targets))?;
+            apply_traced(doc, st, f, tools, op, &resolved_targets)?;
             if op == Operation::Cut
                 && !before.is_empty()
                 && st.bodies.len() == before.len()
@@ -13547,12 +13756,13 @@ fn eval_feature_kind(
             });
             Ok(())
         }
-        FeatureKind::BoundaryFill { tools, cells, operation, remove_tools } => {
-            if tools.is_empty() || tools.len() > 64 || cells.is_empty() || cells.len() > 1000 {
+        FeatureKind::BoundaryFill { tools, tool_features, cells, operation, remove_tools } => {
+            let resolved_tools = resolve_body_inputs(doc, st, f, tools, tool_features, warning)?;
+            if resolved_tools.is_empty() || resolved_tools.len() > 64 || cells.is_empty() || cells.len() > 1000 {
                 return Err(DocError::Invalid("Boundary Fill needs 1…64 tool bodies and 1…1000 cells".into()));
             }
             let tb: Vec<ModelBody> =
-                tools.iter().map(|t| st.body(t).cloned().ok_or_else(|| DocError::Unknown(format!("body `{t}`")))).collect::<Result<_>>()?;
+                resolved_tools.iter().map(|t| st.body(t).cloned().ok_or_else(|| DocError::Unknown(format!("body `{t}`")))).collect::<Result<_>>()?;
             // This construction combines solid interiors; open sheets do not define one.
             if tb.iter().any(|b| b.body.is_mesh() || b.body.is_surface()) {
                 return Err(DocError::Invalid("Boundary Fill needs closed solid tools; open surface and mesh tools are not supported".into()));
@@ -13590,7 +13800,7 @@ fn eval_feature_kind(
                 made.push(cell);
             }
             if *remove_tools {
-                st.bodies.retain(|b| !tools.iter().any(|t| *t == b.name));
+                st.bodies.retain(|b| !resolved_tools.iter().any(|t| *t == b.name));
             }
             apply_traced(doc, st, f, made, *operation, &[])
         }
@@ -14023,9 +14233,16 @@ fn eval_feature_kind(
             let tool = more::cone(point(vals, base)?, axis.0, radius, top_radius, height)?;
             apply_traced(doc, st, f, vec![tool], *operation, &[])
         }
-        FeatureKind::Combine { target, tools, operation, keep_tools } => {
-            if tools.iter().any(|t| t == target) {
+        FeatureKind::Combine { target, tools, tool_features, operation, keep_tools } => {
+            let resolved_tools = resolve_body_inputs(doc, st, f, tools, tool_features, warning)?;
+            if resolved_tools.iter().any(|t| t == target) {
                 return Err(DocError::Invalid("a body cannot be combined with itself".into()));
+            }
+            if st.body(target).is_none() {
+                return Err(DocError::Unknown(format!("body `{target}`")));
+            }
+            if resolved_tools.is_empty() && !tool_features.is_empty() {
+                return Ok(());
             }
             // Each body is kept in its own component's frame: a tool placed differently from the
             // target is moved into the target's frame, so it is combined where it is shown (#3383).
@@ -14034,7 +14251,7 @@ fn eval_feature_kind(
             // A tool of a further placement (`Drill (Hinge:2)`) is not in the model, which holds a
             // component's first placement only: it is placed where its occurrence puts it, in the
             // target's frame (#20040).
-            let missing: Vec<&str> = tools.iter().map(|t| t.0.as_str()).filter(|t| st.body(t).is_none()).collect();
+            let missing: Vec<&str> = resolved_tools.iter().map(|t| t.0.as_str()).filter(|t| st.body(t).is_none()).collect();
             let placed = match &target_world {
                 Some(w) if !missing.is_empty() => {
                     with_placed_copies(doc, st, std::borrow::Cow::Owned(ModelState::default()), w, &missing).into_owned()
@@ -14042,7 +14259,7 @@ fn eval_feature_kind(
                 _ => ModelState::default(),
             };
             let mut tb = Vec::new();
-            for t in tools {
+            for t in &resolved_tools {
                 match st.body(t) {
                     Some(b) => {
                         let traced = b.traced();
@@ -14071,7 +14288,7 @@ fn eval_feature_kind(
                     None => match split_piece_of(t) {
                         Some(base)
                             if st.body(base).is_some()
-                                && (tools.iter().any(|o| **o == *base)
+                                && (resolved_tools.iter().any(|o| **o == *base)
                                     || (**target == *base && matches!(operation, Operation::Join | Operation::NewBody))) =>
                         {
                             append_warning(warning, format!("`{t}` is part of `{base}` now"));
@@ -14091,10 +14308,7 @@ fn eval_feature_kind(
                     },
                 }
             }
-            if st.body(target).is_none() {
-                return Err(DocError::Unknown(format!("body `{target}`")));
-            }
-            if tb.is_empty() && !tools.is_empty() {
+            if tb.is_empty() && !resolved_tools.is_empty() {
                 return Ok(()); // the pieces were all joined back into the body they are part of
             }
             let op = if *operation == Operation::NewBody { Operation::Join } else { *operation };
@@ -14103,8 +14317,9 @@ fn eval_feature_kind(
             // naming the offending body in user terms before attempting the boolean.
             match op {
                 Operation::Join => {
-                    let surface =
-                        std::iter::once(target).chain(tools.iter()).find(|n| st.body(n).or_else(|| placed.body(n)).is_some_and(|b| b.is_surface()));
+                    let surface = std::iter::once(target)
+                        .chain(resolved_tools.iter())
+                        .find(|n| st.body(n).or_else(|| placed.body(n)).is_some_and(|b| b.is_surface()));
                     if let Some(name) = surface {
                         return Err(DocError::Invalid(format!(
                             "{name} is a surface body, and a join needs solids: Thicken it first, or Stitch closed surfaces with Surface › Stitch"
@@ -14112,14 +14327,14 @@ fn eval_feature_kind(
                     }
                 }
                 Operation::Cut => {
-                    if let Some(name) = tools.iter().find(|n| st.body(n).or_else(|| placed.body(n)).is_some_and(|b| !b.is_closed())) {
+                    if let Some(name) = resolved_tools.iter().find(|n| st.body(n).or_else(|| placed.body(n)).is_some_and(|b| !b.is_closed())) {
                         return Err(DocError::Invalid(format!(
                             "\"{name}\" isn't a closed solid (it has open edges), so it can't cut. Close it with Stitch, or use a closed body as the tool"
                         )));
                     }
                 }
                 Operation::Intersect => {
-                    if let Some(name) = tools.iter().find(|n| st.body(n).or_else(|| placed.body(n)).is_some_and(|b| !b.is_closed())) {
+                    if let Some(name) = resolved_tools.iter().find(|n| st.body(n).or_else(|| placed.body(n)).is_some_and(|b| !b.is_closed())) {
                         return Err(DocError::Invalid(format!(
                             "\"{name}\" isn't a closed solid (it has open edges), so it can't intersect. Close it with Stitch, or use a closed body as the tool"
                         )));
@@ -14129,11 +14344,12 @@ fn eval_feature_kind(
             }
             apply_traced(doc, st, f, tb, op, std::slice::from_ref(&target.0))?;
             if !keep_tools {
-                st.bodies.retain(|b| !tools.iter().any(|t| *t == b.name));
+                st.bodies.retain(|b| !resolved_tools.iter().any(|t| *t == b.name));
             }
             Ok(())
         }
-        FeatureKind::Scale { bodies, origin, factor, factors } => {
+        FeatureKind::Scale { bodies, body_features, origin, factor, factors } => {
+            let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
             let k = match factors {
                 Some(fs) => [val(vals, &fs[0], Kind::Unitless)?, val(vals, &fs[1], Kind::Unitless)?, val(vals, &fs[2], Kind::Unitless)?],
                 None => {
@@ -14144,6 +14360,9 @@ fn eval_feature_kind(
             if k.iter().any(|x| !(x.is_finite() && *x > 1e-9 && *x < 1e6)) {
                 return Err(DocError::Invalid("scale factors must be positive".into()));
             }
+            if resolved_bodies.is_empty() && !body_features.is_empty() {
+                return Ok(());
+            }
             let o = *origin;
             // Column-major: scale about the origin.
             let m = [
@@ -14152,7 +14371,7 @@ fn eval_feature_kind(
                 [0.0, 0.0, k[2], 0.0],
                 [o.x * (1.0 - k[0]), o.y * (1.0 - k[1]), o.z * (1.0 - k[2]), 1.0],
             ];
-            for n in bodies {
+            for n in &resolved_bodies {
                 let i = st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
                 if let Some(mb) = st.bodies.get_mut(i) {
                     let nb = Traced::step(kernel::transform_matrix(&mb.body, m)?, &[&mb.traced()]);
@@ -14199,7 +14418,7 @@ fn eval_feature_kind(
         FeatureKind::FrameMemberTurn { .. } => frame_member::check_turn(doc, vals, f, st),
         FeatureKind::FrameMember { .. } => frame_member::evaluate(doc, vals, f, st),
         FeatureKind::FramePlate { .. } => crate::frame_plate::evaluate(doc, vals, f, st),
-        FeatureKind::BoundingSolid { bodies, margin, contents, margins } => {
+        FeatureKind::BoundingSolid { bodies, body_features, margin, contents, margins } => {
             let m = val(vals, margin, Kind::Length)?;
             let side = |i: usize| margins.as_ref().and_then(|ms| ms.get(i)).map_or(Ok(m), |e| val(vals, e, Kind::Length));
             let (lo, hi) = (Vec3::new(side(0)?, side(2)?, side(4)?), Vec3::new(side(1)?, side(3)?, side(5)?));
@@ -14212,8 +14431,10 @@ fn eval_feature_kind(
             } else {
                 // The bodies' display meshes, as before envelopes: a saved Bounding Solid builds
                 // the same box it always did.
+                let all = bodies.is_empty() && body_features.is_empty();
+                let resolved = if all { Vec::new() } else { resolve_body_inputs(doc, st, f, bodies, body_features, warning)? };
                 let mut bb = solidcraft_geom::Aabb3::EMPTY;
-                for b in st.bodies.iter().filter(|b| bodies.is_empty() || bodies.iter().any(|t| *t == b.name)) {
+                for b in st.bodies.iter().filter(|b| all || resolved.iter().any(|t| *t == b.name)) {
                     bb = bb.union(&b.mesh().bounds());
                 }
                 bb
@@ -14232,11 +14453,15 @@ fn eval_feature_kind(
             st.bodies.push(envelope);
             Ok(())
         }
-        FeatureKind::Move { bodies, translate, rotate_axis, rotate_about, origin, angle, copy, copy_frames } => {
+        FeatureKind::Move { bodies, body_features, translate, rotate_axis, rotate_about, origin, angle, copy, copy_frames } => {
+            let resolved_bodies = resolve_body_inputs(doc, st, f, bodies, body_features, warning)?;
             if !copy_frames.is_empty()
-                && (!*copy || copy_frames.len() != bodies.len() || copy_frames.iter().any(|m| !crate::valid_transfer_matrix(m)))
+                && (!*copy || copy_frames.len() != resolved_bodies.len() || copy_frames.iter().any(|m| !crate::valid_transfer_matrix(m)))
             {
                 return Err(DocError::Invalid("invalid Move copy placements".into()));
+            }
+            if resolved_bodies.is_empty() && !body_features.is_empty() {
+                return Ok(());
             }
             let t =
                 Vec3::new(val(vals, &translate[0], Kind::Length)?, val(vals, &translate[1], Kind::Length)?, val(vals, &translate[2], Kind::Length)?);
@@ -14254,7 +14479,7 @@ fn eval_feature_kind(
             // With `copy` set, the source body is kept in place and the transform lands on a new
             // body pushed beside it instead of replacing it.
             let mut output = 0;
-            for n in bodies {
+            for n in &resolved_bodies {
                 let i = st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
                 let Some(mb) = st.bodies.get(i).cloned() else { continue };
                 let nb = kernel::transform(&mb.body, t, origin, axis, ang)?;
@@ -14276,7 +14501,7 @@ fn eval_feature_kind(
                 }
             }
             if !*copy {
-                move_constructions_with(doc, st, bodies, &crate::rigid(t, origin, axis, ang));
+                move_constructions_with(doc, st, &resolved_bodies, &crate::rigid(t, origin, axis, ang));
             }
             Ok(())
         }
